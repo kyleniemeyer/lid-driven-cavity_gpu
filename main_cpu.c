@@ -7,6 +7,9 @@
  * Solve the incompressible, isothermal 2D Navier–Stokes equations for a square
  * lid-driven cavity, using the finite difference method.
  * 
+ * To change the grid resolution, modify "NUM". In addition, the problem is controlled
+ * by the Reynolds number ("Re_num").
+ * 
  * Based on the methodology given in Chapter 3 of "Numerical Simulation in Fluid
  * Dynamics", by M. Griebel, T. Dornseifer, and T. Neunhoeffer. SIAM, Philadelphia,
  * PA, 1998.
@@ -26,7 +29,7 @@
 #define NUM 64
 
 /** Double precision */
-//#define DOUBLE
+#define DOUBLE
 
 #ifdef DOUBLE
 	#define Real double
@@ -201,6 +204,7 @@ void calculate_G (const Real * u, const Real * v, const Real dt,
 
 /** Function to update pressure for red cells
  * 
+ * \param[in]			dt					time-step size
  * \param[in]			F						array of discretized x-momentum eqn terms
  * \param[in]			G						array of discretized y-momentum eqn terms
  * \param[in]			pres_black	pressure values of black cells
@@ -276,10 +280,10 @@ void red_kernel (const Real dt, const Real * F, const Real * G, const Real * pre
 
 /** Function to update pressure for black cells
  * 
+ * \param[in]			dt					time-step size
  * \param[in]			F						array of discretized x-momentum eqn terms
  * \param[in]			G						array of discretized y-momentum eqn terms
  * \param[in]			pres_red		pressure values of red cells
- * \param[in]			dt					time-step size
  * \param[inout]	pres_black	pressure values of black cells
  * \param[inout]	norm_L2			variable holding summed residuals
  */
@@ -395,20 +399,16 @@ void calculate_v (const Real dt, const Real * G,
 			Real p_ij, p_ijp1;
 			if (((row + col) & 1) == 0) {
 				// red pressure cell
-				//p_ij = pres_red[(col * (NUM >> 1)) + ((row - (col & 1)) >> 1)];
-				p_ij = pres_red[(col * (NUM / 2)) + ((row - (col % 2)) / 2)];
+				p_ij = pres_red[(col * (NUM >> 1)) + ((row - (col & 1)) >> 1)];
 				
 				// p_ijp1 is black cell
-				//p_ijp1 = pres_black[(col * (NUM >> 1)) + ((row + 1 - ((col + 1) & 1)) >> 1)];
-				p_ijp1 = pres_black[(col * (NUM / 2)) + ((row + 1 - ((col + 1) % 2)) / 2)];
+				p_ijp1 = pres_black[(col * (NUM >> 1)) + ((row + 1 - ((col + 1) & 1)) >> 1)];
 			} else {
 				// black pressure cell
-				//p_ij = pres_black[(col * (NUM >> 1)) + ((row - ((col + 1) & 1)) >> 1)];
-				p_ij = pres_black[(col * (NUM / 2)) + ((row - ((col + 1) % 2)) / 2)];
+				p_ij = pres_black[(col * (NUM >> 1)) + ((row - ((col + 1) & 1)) >> 1)];
 				
 				// p_ijp1 is red cell
-				//p_ijp1 = pres_red[(col * (NUM >> 1)) + ((row + 1 - (col & 1)) >> 1)];
-				p_ijp1 = pres_red[(col * (NUM / 2)) + ((row + 1 - (col % 2)) / 2)];
+				p_ijp1 = pres_red[(col * (NUM >> 1)) + ((row + 1 - (col & 1)) >> 1)];
 			}
 			
 			v[ind] = G[ind] - (dt * (p_ijp1 - p_ij) / dy);
@@ -422,7 +422,6 @@ void calculate_v (const Real dt, const Real * G,
 
 int main (void)
 {
-	
 	
 	// iterations for Red-Black Gauss-Seidel with SOR
 	uint iter = 0;
@@ -536,11 +535,6 @@ int main (void)
 		}
 		
 		printf("Time: %f, iterations: %i\n", time, iter);
-		
-		
-		//exit(1);
-		
-		
 		
 	} // end while
 	
