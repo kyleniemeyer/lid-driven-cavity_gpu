@@ -2,3 +2,6 @@
 *.o
 *.cu.o
 
+# image files
+*.eps
+*.pdf
