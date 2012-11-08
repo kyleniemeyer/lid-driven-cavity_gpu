@@ -18,8 +18,8 @@ endif
 INCLUDES = -I. -I$(CUDA_PATH)/include/ -I$(SDK_PATH)/C/common/inc/
 LIBS = -L$(CUDA_PATH)/lib -lcuda -L$(SDK_PATH)/C/lib/ -lcutil_x86_64
 
-OBJ_CPU = main_cpu.o
-OBJ_GPU = main_gpu.cu.o
+OBJ_CPU = cavity_cpu.o
+OBJ_GPU = cavity_gpu.cu.o
 
 # flags
 ifeq ("$(L)", "0")
