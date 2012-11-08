@@ -26,18 +26,20 @@
 #include <time.h>
 
 /** Problem size along one side; total number of cells is this squared */
-#define NUM 64
+#define NUM 32
 
 /** Double precision */
-#define DOUBLE
+//#define DOUBLE
 
 #ifdef DOUBLE
 	#define Real double
 #else
 	#define Real float
+	// replace double functions with float versions
+	#define fmin fminf
+	#define fmax fmaxf
+	#define fabs fabsf
 #endif
-
-typedef unsigned int uint;
 
 /** Reynolds number */
 const Real Re_num = 1000.0;
@@ -77,8 +79,8 @@ const Real dy = yLength / NUM;
 void calculate_F (const Real * u, const Real * v, const Real dt, 
 									 Real * F)
 {
-	for (uint row = 0; row < NUM; ++row) {
-		for (uint col = 0; col < NUM - 1; ++col) {
+	for (int row = 0; row < NUM; ++row) {
+		for (int col = 0; col < NUM - 1; ++col) {
 			
 			// u and v velocities
 			Real u_ij = u[(col * NUM) + row];
@@ -141,8 +143,8 @@ void calculate_F (const Real * u, const Real * v, const Real dt,
 void calculate_G (const Real * u, const Real * v, const Real dt, 
 									Real * G)
 {
-	for (uint col = 0; col < NUM; ++col) {
-		for (uint row = 0; row < NUM - 1; ++row) {
+	for (int col = 0; col < NUM; ++col) {
+		for (int row = 0; row < NUM - 1; ++row) {
 			
 			// u and v velocities
 			Real u_ij = u[(col * NUM) + row];
@@ -215,11 +217,11 @@ void red_kernel (const Real dt, const Real * F, const Real * G, const Real * pre
 								 Real * pres_red, Real * norm_L2)
 {
 	// loop over all cells
-	for (uint col = 0; col < NUM; ++col) {
-		for (uint row = 0; row < (NUM / 2); ++row) {
+	for (int col = 0; col < NUM; ++col) {
+		for (int row = 0; row < (NUM / 2); ++row) {
 			
-			uint ind_red = (col * (NUM >> 1)) + row;  					// local (red) index
-			uint ind = (col * NUM) + (2 * row) + (col & 1);		// global index
+			int ind_red = (col * (NUM >> 1)) + row;  					// local (red) index
+			int ind = (col * NUM) + (2 * row) + (col & 1);		// global index
 			
 			Real p_ij = pres_red[ind_red];			
 			
@@ -291,11 +293,11 @@ void black_kernel (const Real dt, const Real * F, const Real * G, const Real * p
 									 Real * pres_black, Real * norm_L2)
 {
 	// loop over all cells
-	for (uint col = 0; col < NUM; ++col) {
-		for (uint row = 0; row < (NUM / 2); ++row) {
+	for (int col = 0; col < NUM; ++col) {
+		for (int row = 0; row < (NUM / 2); ++row) {
 			
-			uint ind_black = (col * (NUM >> 1)) + row;  						// local (black) index
-			uint ind = (col * NUM) + (2 * row) + ((col + 1) & 1);	// global index
+			int ind_black = (col * (NUM >> 1)) + row;  						// local (black) index
+			int ind = (col * NUM) + (2 * row) + ((col + 1) & 1);	// global index
 			
 			Real p_ij = pres_black[ind_black];
 			
@@ -358,10 +360,10 @@ void calculate_u (const Real dt, const Real * F,
 									const Real * pres_red, const Real * pres_black, 
 									Real * u)
 {
-	for (uint col = 0; col < NUM - 1; ++col) {
-		for (uint row = 0; row < NUM; ++row) {
+	for (int col = 0; col < NUM - 1; ++col) {
+		for (int row = 0; row < NUM; ++row) {
 			
-			uint ind = (col * NUM) + row;
+			int ind = (col * NUM) + row;
 			
 			Real p_ij, p_ip1j;
 			if (((row + col) & 1) == 0) {
@@ -391,10 +393,10 @@ void calculate_v (const Real dt, const Real * G,
 									const Real * pres_red, const Real * pres_black, 
 									Real * v)
 {
-	for (uint col = 0; col < NUM; ++col) {
-		for (uint row = 0; row < NUM - 1; ++row) {
+	for (int col = 0; col < NUM; ++col) {
+		for (int row = 0; row < NUM - 1; ++row) {
 			
-			uint ind = (col * NUM) + row;
+			int ind = (col * NUM) + row;
 			
 			Real p_ij, p_ijp1;
 			if (((row + col) & 1) == 0) {
@@ -424,21 +426,22 @@ int main (void)
 {
 	
 	// iterations for Red-Black Gauss-Seidel with SOR
-	uint iter = 0;
-	uint it_max = 10000;
+	int iter = 0;
+	const int it_max = 10000;
 	
 	// SOR iteration tolerance
-	Real tol = 0.001;
+	const Real tol = 0.001;
 	
 	// time range
-	Real time_start = 0.0;
-	Real time_end = 20.0;
+	const Real time_start = 0.0;
+	//const Real time_end = 20.0;
+	const Real time_end = 5.0;
 	
 	// initial time step size
 	Real dt = 0.02;
 	
-	uint size = NUM * NUM;
-	uint size_pres = (NUM / 2) * NUM;
+	int size = NUM * NUM;
+	int size_pres = (NUM / 2) * NUM;
 	
 	// arrays for pressure and velocity
 	Real *F, *u;
@@ -449,7 +452,7 @@ int main (void)
 	G = (Real *) calloc (size, sizeof(Real));
 	v = (Real *) calloc (size, sizeof(Real));
 	
-	for (uint i = 0; i < size; ++i) {
+	for (int i = 0; i < size; ++i) {
 		F[i] = 0.0;
 		u[i] = 0.0;
 		G[i] = 0.0;
@@ -462,7 +465,7 @@ int main (void)
 	pres_red = (Real *) calloc (size_pres, sizeof(Real));
 	pres_black = (Real *) calloc (size_pres, sizeof(Real));
 	
-	for (uint i = 0; i < size_pres; ++i) {
+	for (int i = 0; i < size_pres; ++i) {
 		pres_red[i] = 0.0;
 		pres_black[i] = 0.0;
 	}
@@ -472,6 +475,8 @@ int main (void)
 	clock_t start_time = clock();
 	//////////////////////////////
 	
+	// time-step size based on grid and Reynolds number
+	Real dt_Re = 0.5 * Re_num / ((1.0 / (dx * dx)) + (1.0 / (dy * dy)));
 	
 	Real time = time_start;
 	
@@ -482,7 +487,6 @@ int main (void)
 		time += dt;
 		
 		// calculate F and G
-		
 		calculate_F (u, v, dt, F);
 		calculate_G (u, v, dt, G);
 		
@@ -499,7 +503,7 @@ int main (void)
 			black_kernel (dt, F, G, pres_red, pres_black, &norm_L2);
 
 			// calculate residual
-			norm_L2 = sqrt(norm_L2 / ((double)size));
+			norm_L2 = sqrt(norm_L2 / ((Real)size));
 
 			// if tolerance has been reached, end SOR iterations
 			if (norm_L2 < tol) {
@@ -512,23 +516,18 @@ int main (void)
 		calculate_u (dt, F, pres_red, pres_black, u);
 		calculate_v (dt, G, pres_red, pres_black, v);
 		
-		// calculate new time step based on stability
-		dt = 0.5 * Re_num / ((1.0 / (dx * dx)) + (1.0 / (dy * dy)));
-		
 		Real max_u = 0.0;
-		for (uint i = 0; i < NUM * NUM; ++i) {
+		Real max_v = 0.0;
+		for (int i = 0; i < NUM * NUM; ++i) {
 			Real test_u = fabs(u[i]);
 			max_u = MAX(max_u, test_u);
-		}
-		
-		Real max_v = 0.0;
-		for (uint i = 0; i < NUM * NUM; ++i) {
+			
 			Real test_v = fabs(v[i]);
 			max_v = MAX(max_v, test_v);
 		}
 		
 		max_u = MIN((dx / max_u), (dy / max_v));
-		dt = tau * MIN(dt, max_u);
+		dt = tau * MIN(dt_Re, max_u);
 		
 		if ((time + dt) >= time_end) {
 			dt = time_end - time;
@@ -551,8 +550,8 @@ int main (void)
 	pfile = fopen("velocity_cpu.dat", "w");
 	fprintf(pfile, "#x\ty\tu\tv\n");
 	if (pfile != NULL) {
-		for (uint row = 0; row < NUM; ++row) {
-			for (uint col = 0; col < NUM; ++col) {
+		for (int row = 0; row < NUM; ++row) {
+			for (int col = 0; col < NUM; ++col) {
 				
 				Real u_ij = u[(col * NUM) + row];
 				Real u_im1j;
@@ -574,7 +573,7 @@ int main (void)
 				
 				v_ij = (v_ij + v_ijm1) / 2.0;
 				
-				fprintf(pfile, "%f\t%f\t%f\t%f\n", ((double)col + 0.5) * dx, ((double)row + 0.5) * dy, u_ij, v_ij);
+				fprintf(pfile, "%f\t%f\t%f\t%f\n", ((Real)col + 0.5) * dx, ((Real)row + 0.5) * dy, u_ij, v_ij);
 			}
 		}
 	}
