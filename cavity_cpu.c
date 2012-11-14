@@ -28,7 +28,7 @@
  #include "timer.h"
 
 /** Problem size along one side; total number of cells is this squared */
-#define NUM 64
+#define NUM 256
 
 /** Double precision */
 #define DOUBLE
@@ -288,8 +288,9 @@ void calculate_G (const Real dt, const Real* restrict u, const Real* restrict v,
 } // end calculate_G
 
 ///////////////////////////////////////////////////////////////////////////////
-Real sum_pressure (const Real* restrict pres_red, const Real* restrict pres_black) {
 
+Real sum_pressure (const Real* restrict pres_red, const Real* restrict pres_black)
+{
 	int row, col;
 	Real sum = ZERO;
 
@@ -311,7 +312,7 @@ Real sum_pressure (const Real* restrict pres_red, const Real* restrict pres_blac
 	} // end for col
 
 	return sum;
-}
+} // end sum_pressure
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -615,15 +616,16 @@ Real calculate_u (const Real dt, const Real* restrict F,
 				u(col, (2 * row) - ((col + 1) & 1)) = new_u2;
 
 				// check for max of these two
-				new_u = fmax(new_u, new_u2);
-
-				// get maximum u velocity
-				max_u = fmax(max_u, fabs(new_u));
+				new_u = fmax(fabs(new_u), fabs(new_u2));
 
 				if ((2 * row) == NUM) {
 					// also test for max velocity at vertical boundary
-					max_u = fmax(max_u, fabs( u(col, NUM + 1) ));
+					new_u = fmax(new_u, fabs( u(col, NUM + 1) ));
 				}
+
+				// get maximum u velocity
+				max_u = fmax(max_u, new_u);
+
 			} else {
 				// check for maximum velocity in boundary cells also
 				Real test_u = fmax(fabs( u(NUM, (2 * row)) ), fabs( u(0, (2 * row)) ));
@@ -683,15 +685,16 @@ Real calculate_v (const Real dt, const Real* restrict G,
 
 
 				// check for max of these two
-				new_v = fmax(new_v, new_v2);
-
-				// get maximum v velocity
-				max_v = fmax(max_v, fabs(new_v));
+				new_v = fmax(fabs(new_v), fabs(new_v2));
 
 				if (col == NUM) {
 					// also test for max velocity at vertical boundary
-					max_v = fmax(max_v, fabs( v(NUM + 1, (2 * row)) ));
+					new_v = fmax(new_v, fabs( v(NUM + 1, (2 * row)) ));
 				}
+
+				// get maximum v velocity
+				max_v = fmax(max_v, new_v);
+
 			} else {
 
 				Real new_v;
@@ -713,7 +716,7 @@ Real calculate_v (const Real dt, const Real* restrict G,
 				}
 
 				// get maximum v velocity
-				Real test_v = fmax(max_v, fabs(new_v));
+				Real test_v = fabs(new_v);
 
 				// check for maximum velocity in boundary cells also
 				test_v = fmax(fabs( v(col, NUM) ), test_v);
@@ -854,25 +857,6 @@ int main (void)
 		/////////////////////////
 		// calculate new pressure
 		/////////////////////////
-		
-		/*
-		printf("F\n");
-		for (int row = 0; row < NUM + 2; ++row) {
-			for (int col = 0; col < NUM + 2; ++col) {
-				printf("%f ", F(col, row));
-			}
-			printf("\n");
-		}
-		printf("\n");
-		printf("G\n");
-		for (int row = 0; row < NUM + 2; ++row) {
-			for (int col = 0; col < NUM + 2; ++col) {
-				printf("%f ", G(col, row));
-			}
-			printf("\n");
-		}
-		printf("\n");
-		*/
 
 		// get L2 norm of initial pressure
 		Real p0_norm = sum_pressure (pres_red, pres_black);
@@ -913,29 +897,7 @@ int main (void)
 			if (norm_L2 < tol) {
 				break;
 			}
-		} // end for
-
-		
-		/*
-		for (int row = 0; row < NUM + 2; ++row) {
-			for (int col = 0; col < NUM + 2; ++col) {
-				Real pres;
-
-				int NUM_2 = NUM >> 1;
-
-				if ((row + col) % 2 == 0) {
-					// even, so red cell
-					printf("%f ", pres_red(col, ((row + (col & 1)) >> 1)) );
-				} else {
-					// odd, so black cell
-					//pres = pres_black[(col * (NUM_2 + 2)) + ((row + ((col + 1) & 1)) >> 1)];
-					printf("%f ", pres_black(col, ((row + ((col + 1) & 1)) >> 1)) );
-				}
-			}
-			printf("\n");
-		}
-		printf("\n");
-		*/
+		} // end for		
 		
 		printf("Time = %f, delt = %e, iter = %i, res = %e\n", time + dt, dt, iter, norm_L2);
 
@@ -945,28 +907,6 @@ int main (void)
 
 		// set boundary conditions
 		set_BCs (u, v);
-
-		/*
-		printf("u\n");
-		for (int row = 0; row < NUM + 2; ++row) {
-			for (int col = 0; col < NUM + 2; ++col) {
-				printf("%f ", u(col, row));
-			}
-			printf("\n");
-		}
-		printf("\n");
-		printf("v\n");
-		for (int row = 0; row < NUM + 2; ++row) {
-			for (int col = 0; col < NUM + 2; ++col) {
-				printf("%f ", v(col, row));
-			}
-			printf("\n");
-		}
-		printf("\n");
-		*/
-		//if (time > 0.0625)
-		//	exit(1);
-		
 
 		// increase time
 		time += dt;
