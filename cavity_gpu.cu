@@ -22,180 +22,257 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
-#include <time.h>
+
+ #include "timer.h"
 
 // CUDA libraries
 #include <cuda.h>
-#include <cutil.h>
+#include <helper_cuda.h>
 
 /** Problem size along one side; total number of cells is this squared */
 #define NUM 256
 
 // block size
-#define BLOCK_SIZE 64
+#define BLOCK_SIZE 128
 
 /** Double precision */
-//#define DOUBLE
+#define DOUBLE
 
 #ifdef DOUBLE
 	#define Real double
-	
-	#define ZERO 0.0
+
+ 	#define ZERO 0.0
 	#define ONE 1.0
 	#define TWO 2.0
-	#define FOUR 4.0
+ 	#define FOUR 4.0
+
+ 	#define SMALL 1.0e-10;
+
+	/** Reynolds number */
+	const Real Re_num = 1000.0;
+
+	/** SOR relaxation parameter */
+	const Real omega = 1.7;
+
+	/** Discretization mixture parameter (gamma) */
+	const Real mix_param = 0.9;
+
+	/** Safety factor for time step modification */
+	const Real tau = 0.5;
+
+	/** Body forces in x- and y- directions */
+	const Real gx = 0.0;
+	const Real gy = 0.0;
+
+	/** Domain size (non-dimensional) */
+	#define xLength 1.0
+	#define yLength 1.0
 #else
 	#define Real float
+
 	// replace double functions with float versions
+	#undef fmin
 	#define fmin fminf
+	#undef fmax
 	#define fmax fmaxf
+	#undef fabs
 	#define fabs fabsf
-	
-	#define ZERO 0.0f
+	#undef sqrt
+	#define sqrt sqrtf
+
+ 	#define ZERO 0.0f
 	#define ONE 1.0f
 	#define TWO 2.0f
 	#define FOUR 4.0f
+	#define SMALL 1.0e-10f;
+
+		/** Reynolds number */
+	const Real Re_num = 1000.0f;
+
+	/** SOR relaxation parameter */
+	const Real omega = 1.7f;
+
+	/** Discretization mixture parameter (gamma) */
+	const Real mix_param = 0.9f;
+
+	/** Safety factor for time step modification */
+	const Real tau = 0.5f;
+
+	/** Body forces in x- and y- directions */
+	const Real gx = 0.0f;
+	const Real gy = 0.0f;
+
+	/** Domain size (non-dimensional) */
+	#define xLength 1.0f
+	#define yLength 1.0f
 #endif
 
-/** Use shared memory */
-#define SHARED
-
-/** Use atomic operations to calculate residual, only for SINGLE PRECISION */
-//#define ATOMIC
-
-#if defined (ATOMIC) && defined (DOUBLE)
-# error double precision atomic operations not supported
-#endif
-
-typedef unsigned int uint;
-
-/** Reynolds number */
-#ifdef DOUBLE
-const Real Re_num = 1000.0;
-#else
-const Real Re_num = 1000.0f;
-#endif
-
-/** SOR relaxation parameter */
-#ifdef DOUBLE
-const Real omega = 1.7;
-#else
-const Real omega = 1.7f;
-#endif
-
-/** Discretization mixture parameter */
-#ifdef DOUBLE
-const Real mix_param = 0.9;
-#else
-const Real mix_param = 0.9f;
-#endif
-
-/** Safety factor for time step modification */
-#ifdef DOUBLE
-const Real tau = 0.5;
-#else
-const Real tau = 0.5f;
-#endif
-
-/** Body forces in x- and y- directions */
-const Real gx = ZERO;
-const Real gy = ZERO;
-
-/** Normalized lid velocity */
-const Real uStar = ONE;
-
-/** Domain size (non-dimensional) */
-#define xLength ONE
-#define yLength ONE
 
 /** Mesh sizes */
 const Real dx = xLength / NUM;
 const Real dy = yLength / NUM;
 
 /** Max macro (type safe, from GNU) */
-#define MAX(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a > _b ? _a : _b; })
+//#define MAX(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a > _b ? _a : _b; })
 
 /** Min macro (type safe) */
-#define MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
+//#define MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
-#ifdef ATOMIC
-// need bijection between float and unsigned int to use atomicMax()
+// map two-dimensional indices to one-dimensional memory
+#define u(I, J) u[((I) * ((NUM) + 2)) + (J)]
+#define v(I, J) v[((I) * ((NUM) + 2)) + (J)]
+#define F(I, J) F[((I) * ((NUM) + 2)) + (J)]
+#define G(I, J) G[((I) * ((NUM) + 2)) + (J)]
+#define pres_red(I, J) pres_red[((I) * ((NUM_2) + 2)) + (J)]
+#define pres_black(I, J) pres_black[((I) * ((NUM_2) + 2)) + (J)]
 
-static __inline__ __device__ unsigned int floatFlip (float theFloat)
+///////////////////////////////////////////////////////////////////////////////
+__host__
+void set_BCs_host (Real* u, Real* v) 
 {
-	unsigned int mask = (__float_as_int(theFloat) >> 31) | 0x80000000;
-	return __float_as_int(theFloat) ˆ mask;
-}
+	int ind;
 
-inline __host__ float invFloatFlip (unsigned int theUint)
+	// loop through rows and columns
+	for (ind = 0; ind < NUM + 2; ++ind) {
+
+		// left boundary
+		u(0, ind) = ZERO;
+		v(0, ind) = -v(1, ind);
+
+		// right boundary
+		u(NUM, ind) = ZERO;
+		v(NUM + 1, ind) = -v(NUM, ind);
+
+		// bottom boundary
+		u(ind, 0) = -u(ind, 1);
+		v(ind, 0) = ZERO;
+
+		// top boundary
+		u(ind, NUM + 1) = TWO - u(ind, NUM);
+		v(ind, NUM) = ZERO;
+
+		if (ind == NUM) {
+			// left boundary
+			u(0, 0) = ZERO;
+			v(0, 0) = -v(1, 0);
+			u(0, NUM + 1) = ZERO;
+			v(0, NUM + 1) = -v(1, NUM + 1);
+
+			// right boundary
+			u(NUM, 0) = ZERO;
+			v(NUM + 1, 0) = -v(NUM, 0);
+			u(NUM, NUM + 1) = ZERO;
+			v(NUM + 1, NUM + 1) = -v(NUM, NUM + 1);
+
+			// bottom boundary
+			u(0, 0) = -u(0, 1);
+			v(0, 0) = ZERO;
+			u(NUM + 1, 0) = -u(NUM + 1, 1);
+			v(NUM + 1, 0) = ZERO;
+
+			// top boundary
+			u(0, NUM + 1) = TWO - u(0, NUM);
+			v(0, NUM) = ZERO;
+			u(NUM + 1, NUM + 1) = TWO - u(NUM + 1, NUM);
+			v(ind, NUM + 1) = ZERO;
+		} // end if
+
+	} // end for
+
+} // end set_BCs_host
+
+///////////////////////////////////////////////////////////////////////////////
+__global__
+void set_BCs (Real* u, Real* v) 
 {
-	unsigned int mask = ((theUint >> 31) - 1) | 0x80000000;
-	return __int_as_float((int)(theUint ^ mask));
-}
-#endif
+	int ind = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+
+	// left boundary
+	u(0, ind) = ZERO;
+	v(0, ind) = -v(1, ind);
+
+	// right boundary
+	u(NUM, ind) = ZERO;
+	v(NUM + 1, ind) = -v(NUM, ind);
+
+	// bottom boundary
+	u(ind, 0) = -u(ind, 1);
+	v(ind, 0) = ZERO;
+
+	// top boundary
+	u(ind, NUM + 1) = TWO - u(ind, NUM);
+	v(ind, NUM) = ZERO;
+
+	if (ind == NUM) {
+		// left boundary
+		u(0, 0) = ZERO;
+		v(0, 0) = -v(1, 0);
+		u(0, NUM + 1) = ZERO;
+		v(0, NUM + 1) = -v(1, NUM + 1);
+
+		// right boundary
+		u(NUM, 0) = ZERO;
+		v(NUM + 1, 0) = -v(NUM, 0);
+		u(NUM, NUM + 1) = ZERO;
+		v(NUM + 1, NUM + 1) = -v(NUM, NUM + 1);
+
+		// bottom boundary
+		u(0, 0) = -u(0, 1);
+		v(0, 0) = ZERO;
+		u(NUM + 1, 0) = -u(NUM + 1, 1);
+		v(NUM + 1, 0) = ZERO;
+
+		// top boundary
+		u(0, NUM + 1) = TWO - u(0, NUM);
+		v(0, NUM) = ZERO;
+		u(NUM + 1, NUM + 1) = TWO - u(NUM + 1, NUM);
+		v(ind, NUM + 1) = ZERO;
+	} // end if
+
+} // end set_BCs
 
 ///////////////////////////////////////////////////////////////////////////////
 
 __global__ 
-void calculate_F (const Real * u, const Real * v, const Real dt, 
-									 Real * F)
+void calculate_F (const Real dt, const Real* u, const Real* v,
+				  Real* F) 
 {	
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	if (col == (NUM - 1)) {
+	if (col == NUM) {
 		// right boundary, F_ij = u_ij
-		F[((NUM - 1) * NUM) + row] = u[((NUM - 1) * NUM) + row];
+		// also do left boundary
+		F(0, row) = u(0, row);
+		F(NUM, row) = u(NUM, row);
 	} else {
 		
-		// u and v velocities
-		Real u_ij = u[(col * NUM) + row];
-		Real u_ip1j = u[((col + 1) * NUM) + row];
-		
-		Real v_ij = v[(col * NUM) + row];
-		Real v_ip1j = v[((col + 1) * NUM) + row];
-		
-		// left boundary
-		Real u_im1j;
-		if (col == 0) {
-			u_im1j = ZERO;
-		} else {
-			u_im1j = u[((col - 1) * NUM) + row];
-		}
-		
-		// bottom boundary
-		Real u_ijm1, v_ijm1, v_ip1jm1;
-		if (row == 0) {
-			u_ijm1 = -u_ij;
-			v_ijm1 = ZERO;
-			v_ip1jm1 = ZERO;
-		} else {
-			u_ijm1 = u[(col * NUM) + row - 1];
-			v_ijm1 = v[(col * NUM) + row - 1];
-			v_ip1jm1 = v[((col + 1) * NUM) + row - 1];
-		}
-		
-		// top boundary
-		Real u_ijp1;
-		if (row == (NUM - 1)) {
-			u_ijp1 = (TWO * uStar) - u_ij;
-		} else {
-			u_ijp1 = u[(col * NUM) + row + 1];
-		}
+		// u velocities
+		Real u_ij = u(col, row);
+		Real u_ip1j = u(col + 1, row);
+		Real u_ijp1 = u(col, row + 1);
+		Real u_im1j = u(col - 1, row);
+		Real u_ijm1 = u(col, row - 1);
+
+		// v velocities
+		Real v_ij = v(col, row);
+		Real v_ip1j = v(col + 1, row);
+		Real v_ijm1 = v(col, row - 1);
+		Real v_ip1jm1 = v(col + 1, row - 1);
 		
 		// finite differences
 		Real du2dx, duvdy, d2udx2, d2udy2;
 
 		du2dx = (((u_ij + u_ip1j) * (u_ij + u_ip1j) - (u_im1j + u_ij) * (u_im1j + u_ij))
-						+ mix_param * (fabs(u_ij + u_ip1j) * (u_ij - u_ip1j)
-						- fabs(u_im1j + u_ij) * (u_im1j - u_ij))) / (FOUR * dx);
+				+ mix_param * (fabs(u_ij + u_ip1j) * (u_ij - u_ip1j)
+				- fabs(u_im1j + u_ij) * (u_im1j - u_ij))) / (FOUR * dx);
 		duvdy = ((v_ij + v_ip1j) * (u_ij + u_ijp1) - (v_ijm1 + v_ip1jm1) * (u_ijm1 + u_ij)
-					+ mix_param * (fabs(v_ij + v_ip1j) * (u_ij - u_ijp1)
-					- fabs(v_ijm1 + v_ip1jm1) * (u_ijm1 - u_ij))) / (FOUR * dy);
-	 	d2udx2 = (u_ip1j - (TWO * u_ij) + u_im1j) / (dx * dx);
-	  	d2udy2 = (u_ijp1 - (TWO * u_ij) + u_ijm1) / (dy * dy);
+				+ mix_param * (fabs(v_ij + v_ip1j) * (u_ij - u_ijp1)
+				- fabs(v_ijm1 + v_ip1jm1) * (u_ijm1 - u_ij))) / (FOUR * dy);
+		d2udx2 = (u_ip1j - (TWO * u_ij) + u_im1j) / (dx * dx);
+		d2udy2 = (u_ijp1 - (TWO * u_ij) + u_ijm1) / (dy * dy);
 
-		F[(col * NUM) + row] = u_ij + dt * (((d2udx2 + d2udy2) / Re_num) - du2dx - duvdy + gx);
+		F(col, row) = u_ij + dt * (((d2udx2 + d2udy2) / Re_num) - du2dx - duvdy + gx);
 		
 	} // end if
 		
@@ -204,64 +281,45 @@ void calculate_F (const Real * u, const Real * v, const Real dt,
 ///////////////////////////////////////////////////////////////////////////////
 
 __global__ 
-void calculate_G (const Real * u, const Real * v, const Real dt, 
-									 Real * G)
+void calculate_G (const Real dt, const Real* u, const Real* v,
+				  Real* G) 
 {
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	if (row == (NUM - 1)) {
-		G[(col * NUM) + NUM - 1] = v[(col * NUM) + NUM - 1];
+	if (row == NUM) {
+		// top and bottom boundaries
+		G(col, 0) = v(col, 0);
+		G(col, NUM) = v(col, NUM);
+
 	} else {
 		
-		// u and v velocities
-		Real u_ij = u[(col * NUM) + row];
-		Real u_ijp1 = u[(col * NUM) + row + 1];
-		
-		Real v_ij = v[(col * NUM) + row];
-		Real v_ijp1 = v[(col * NUM) + row + 1];
-		
-		// bottom boundary
-		Real v_ijm1;
-		if (row == 0) {
-			v_ijm1 = ZERO;
-		} else {
-			v_ijm1 = v[(col * NUM) + row - 1];
-		}
-		
-		// left boundary
-		Real v_im1j, u_im1j, u_im1jp1;
-		if (col == 0) {
-			v_im1j = -v_ij;
-			u_im1j = ZERO;
-			u_im1jp1 = ZERO;
-		} else {
-			v_im1j = v[((col - 1) * NUM) + row];
-			u_im1j = u[((col - 1) * NUM) + row];
-			u_im1jp1 = u[((col - 1) * NUM) + row + 1];
-		}
-		
-		// right boundary
-		Real v_ip1j;
-		if (col == (NUM - 1)) {
-			v_ip1j = -v_ij;
-		} else {
-			v_ip1j = v[((col + 1) * NUM) + row];
-		}
+		// u velocities
+		Real u_ij = u(col, row);
+		Real u_ijp1 = u(col, row + 1);
+		Real u_im1j = u(col - 1, row);
+		Real u_im1jp1 = u(col - 1, row + 1);
+
+		// v velocities
+		Real v_ij = v(col, row);
+		Real v_ijp1 = v(col, row + 1);
+		Real v_ip1j = v(col + 1, row);
+		Real v_ijm1 = v(col, row - 1);
+		Real v_im1j = v(col - 1, row);
 		
 		// finite differences
 		Real dv2dy, duvdx, d2vdx2, d2vdy2;
-	
-		dv2dy = ((v_ij + v_ijp1) * (v_ij + v_ijp1) - (v_ijm1 + v_ij) * (v_ijm1 + v_ij)
-		  		+ mix_param * (fabs(v_ij + v_ijp1) * (v_ij - v_ijp1)
-					- fabs(v_ijm1 + v_ij) * (v_ijm1 - v_ij))) / (FOUR * dy);
-		duvdx = ((u_ij + u_ijp1) * (v_ij + v_ip1j) - (u_im1j + u_im1jp1) * (v_im1j + v_ij)
-					+ mix_param * (fabs(u_ij + u_ijp1) * (v_ij - v_ip1j) 
-					- fabs(u_im1j + u_im1jp1) * (v_im1j - v_ij))) / (FOUR * dx);
-	  	d2vdx2 = (v_ip1j - (TWO * v_ij) + v_im1j) / (dx * dx);
-	  	d2vdy2 = (v_ijp1 - (TWO * v_ij) + v_ijm1) / (dy * dy);
 
-		G[(col * NUM) + row] = v_ij + dt * (((d2vdx2 + d2vdy2) / Re_num) - dv2dy - duvdx + gy);
+		dv2dy = ((v_ij + v_ijp1) * (v_ij + v_ijp1) - (v_ijm1 + v_ij) * (v_ijm1 + v_ij)
+				+ mix_param * (fabs(v_ij + v_ijp1) * (v_ij - v_ijp1)
+				- fabs(v_ijm1 + v_ij) * (v_ijm1 - v_ij))) / (FOUR * dy);
+		duvdx = ((u_ij + u_ijp1) * (v_ij + v_ip1j) - (u_im1j + u_im1jp1) * (v_im1j + v_ij)
+				+ mix_param * (fabs(u_ij + u_ijp1) * (v_ij - v_ip1j) 
+				- fabs(u_im1j + u_im1jp1) * (v_im1j - v_ij))) / (FOUR * dx);
+		d2vdx2 = (v_ip1j - (TWO * v_ij) + v_im1j) / (dx * dx);
+		d2vdy2 = (v_ijp1 - (TWO * v_ij) + v_ijm1) / (dy * dy);
+
+		G(col, row) = v_ij + dt * (((d2vdx2 + d2vdy2) / Re_num) - dv2dy - duvdx + gy);
 			
 	} // end if
 		
@@ -269,106 +327,118 @@ void calculate_G (const Real * u, const Real * v, const Real dt,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+__global__ 
+void sum_pressure (const Real* pres_red, const Real* pres_black, 
+					Real* pres_sum) 
+{
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
+
+	// shared memory for block's sum
+	__shared__ Real sum_cache[BLOCK_SIZE];
+			
+	int NUM_2 = NUM >> 1;
+
+	Real pres_r = pres_red(col, row);
+	Real pres_b = pres_black(col, row);
+
+	// add squared pressure
+	sum_cache[threadIdx.x] = (pres_r * pres_r) + (pres_b * pres_b);
+
+	// synchronize threads in block to ensure all thread values stored
+	__syncthreads();
+
+	// add up values for block
+	int i = BLOCK_SIZE >> 1;
+	while (i != 0) {
+		if (threadIdx.x < i) {
+			sum_cache[threadIdx.x] += sum_cache[threadIdx.x + i];
+		}
+		__syncthreads();
+		i >>= 1;
+	}
+
+	// store block's summed values
+	if (threadIdx.x == 0) {
+		pres_sum[blockIdx.y + (gridDim.y * blockIdx.x)] = sum_cache[0];
+	}
+
+} // end sum_pressure
+
+///////////////////////////////////////////////////////////////////////////////
+__global__ 
+void set_horz_pres_BCs (Real* pres_red, Real* pres_black) 
+{
+	int col = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	col = (col * 2) - 1;
+
+	int NUM_2 = NUM >> 1;
+
+	// p_i,0 = p_i,1
+	pres_black(col, 0) = pres_red(col, 1);
+	pres_red(col + 1, 0) = pres_black(col + 1, 1);
+
+	// p_i,jmax+1 = p_i,jmax
+	pres_red(col, NUM_2 + 1) = pres_black(col, NUM_2);
+	pres_black(col + 1, NUM_2 + 1) = pres_red(col + 1, NUM_2);
+
+} // end set_horz_pres_BCs
+
+//////////////////////////////////////////////////////////////////////////////
+
+__global__
+void set_vert_pres_BCs (Real* pres_red, Real* pres_black) 
+{
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+
+	int NUM_2 = NUM >> 1;
+
+	// p_0,j = p_1,j
+	pres_black(0, row) = pres_red(1, row);
+	pres_red(0, row) = pres_black(1, row);
+
+	// p_imax+1,j = p_imax,j
+	pres_black(NUM + 1, row) = pres_red(NUM, row);
+	pres_red(NUM + 1, row) = pres_black(NUM, row);
+
+} // end set_pressure_BCs
+
+///////////////////////////////////////////////////////////////////////////////
+
 /** Function to update pressure for red cells
  * 
- * \param[in]			dt					time-step size
- * \param[in]			F						array of discretized x-momentum eqn terms
- * \param[in]			G						array of discretized y-momentum eqn terms
- * \param[in]			pres_black	pressure values of black cells
- * \param[inout]	pres_red		pressure values of red cells
- * \param[inout]	norm_L2			variable holding summed residuals
+ * \param[in]		dt			time-step size
+ * \param[in]		F			array of discretized x-momentum eqn terms
+ * \param[in]		G			array of discretized y-momentum eqn terms
+ * \param[in]		pres_black	pressure values of black cells
+ * \param[inout]	pres_red	pressure values of red cells
  */
-__global__ 
-void red_kernel (const Real dt, const Real * F, const Real * G, const Real * pres_black,
-								 Real * pres_red, Real * norm_L2)
+__global__
+void red_kernel (const Real dt, const Real* F, 
+				 const Real* G, const Real* pres_black,
+				 Real* pres_red) 
 {
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	int ind_red = (col * (NUM >> 1)) + row;  					// local (red) index
-	int ind = (col * NUM) + (2 * row) + (col & 1);		// global index
-
-	Real p_ij = pres_red[ind_red];			
-
-	// left boundary
-	Real p_im1j;
-	Real F_im1j;
-	if (col == 0) {
-		p_im1j = p_ij;
-		F_im1j = ZERO;
-	} else {
-		p_im1j = pres_black[((col - 1) * (NUM >> 1)) + row];
-		F_im1j = F[((col - 1) * NUM) + (2 * row) + (col & 1)];
-	}
-
-	// right boundary
-	Real p_ip1j;
-	if (col == (NUM - 1)) {
-		p_ip1j = p_ij;
-	} else {
-		p_ip1j = pres_black[((col + 1) * (NUM >> 1)) + row];
-	}
-
-	// bottom boundary
-	Real p_ijm1;
-	Real G_ijm1;
-	if (((2 * row) + (col & 1)) == 0) {
-		p_ijm1 = p_ij;
-		G_ijm1 = ZERO;
-	} else {
-		p_ijm1 = pres_black[(col * (NUM >> 1)) + row - ((col + 1) & 1)];
-		G_ijm1 = G[(col * NUM) + (2 * row) + (col & 1) - 1];
-	}
-
-	// top boundary
-	Real p_ijp1;
-	if (((2 * row) + (col & 1)) == (NUM - 1)) {
-		p_ijp1 = p_ij;
-	} else {
-		p_ijp1 = pres_black[(col * (NUM >> 1)) + row + (col & 1)];
-	}
-
+	int NUM_2 = NUM >> 1;			
+	
+	Real p_ij = pres_red(col, row);
+	
+	Real p_im1j = pres_black(col - 1, row);
+	Real p_ip1j = pres_black(col + 1, row);
+	Real p_ijm1 = pres_black(col, row - (col & 1));
+	Real p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+	
 	// right-hand side
-	Real rhs = (((F[ind] - F_im1j) / dx) + ((G[ind] - G_ijm1) / dy)) / dt;
-
-	pres_red[ind_red] = p_ij * (ONE - omega) + omega * (
-										  ((p_ip1j + p_im1j) / (dx * dx)) + ((p_ijp1 + p_ijm1) / (dy * dy)) - 
-										  rhs) / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
+	Real rhs = (((F(col, (2 * row) - (col & 1))
+			    - F(col - 1, (2 * row) - (col & 1))) / dx)
+			  + ((G(col, (2 * row) - (col & 1))
+			    - G(col, (2 * row) - (col & 1) - 1)) / dy)) / dt;
 	
-	// calculate residual (reuse rhs variable)
-	rhs = ((p_ip1j - (TWO * p_ij) + p_im1j) / (dx * dx)) + ((p_ijp1 - (TWO * p_ij) + p_ijm1) / (dy * dy)) - rhs;
-	
-	#ifdef SHARED
-		// store residual for block
-		__shared__ Real res_cache[BLOCK_SIZE];
-	
-		// store squared residual from each thread
-		res_cache[threadIdx.y] = rhs * rhs;
-	
-		// synchronize threads in block
-		__syncthreads();
-	
-		// add up squared residuals for block
-		int i = BLOCK_SIZE >> 1;
-		while (i != 0) {
-			if (threadIdx.y < i) {
-				res_cache[threadIdx.y] += res_cache[threadIdx.y + i];
-			}
-			__syncthreads();
-			i >>= 1;
-		}
-	
-		// store block's summed residuals
-		if (threadIdx.y == 0) {
-			#ifdef ATOMIC
-				atomicAdd (norm_L2, res_cache[0]);
-			#else
-				norm_L2[blockIdx.x + (gridDim.x * blockIdx.y)] = res_cache[0];
-			#endif
-		}
-	#else
-		norm_L2[ind_red] = rhs * rhs;
-	#endif
+	pres_red(col, row) = p_ij * (ONE - omega) + omega * 
+		(((p_ip1j + p_im1j) / (dx * dx)) + ((p_ijp1 + p_ijm1) / (dy * dy)) - 
+		rhs) / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
 	
 } // end red_kernel
 
@@ -376,267 +446,281 @@ void red_kernel (const Real dt, const Real * F, const Real * G, const Real * pre
 
 /** Function to update pressure for black cells
  * 
- * \param[in]			dt					time-step size
- * \param[in]			F						array of discretized x-momentum eqn terms
- * \param[in]			G						array of discretized y-momentum eqn terms
- * \param[in]			pres_red		pressure values of red cells
+ * \param[in]		dt			time-step size
+ * \param[in]		F			array of discretized x-momentum eqn terms
+ * \param[in]		G			array of discretized y-momentum eqn terms
+ * \param[in]		pres_red	pressure values of red cells
  * \param[inout]	pres_black	pressure values of black cells
- * \param[inout]	norm_L2			variable holding summed residuals
  */
 __global__ 
-void black_kernel (const Real dt, const Real * F, const Real * G, const Real * pres_red,
-									 Real * pres_black, Real * norm_L2)
+void black_kernel (const Real dt, const Real* F, 
+				   const Real* G, const Real* pres_red, 
+				   Real* pres_black) 
 {
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	int ind_black = (col * (NUM >> 1)) + row;  						// local (black) index
-	int ind = (col * NUM) + (2 * row) + ((col + 1) & 1);	// global index
+	int NUM_2 = NUM >> 1;
 	
-	Real p_ij = pres_black[ind_black];
-	
-	// left boundary
-	Real p_im1j;
-	Real F_im1j;
-	if (col == 0) {
-		p_im1j = p_ij;
-		F_im1j = ZERO;
-	} else {
-		p_im1j = pres_red[((col - 1) * (NUM >> 1)) + row];
-		F_im1j = F[((col - 1) * NUM) + (2 * row) + ((col + 1) & 1)];
-	}
-	
-	// right boundary
-	Real p_ip1j;
-	if (col == (NUM - 1)) {
-		p_ip1j = p_ij;
-	} else {
-		p_ip1j = pres_red[((col + 1) * (NUM >> 1)) + row];
-	}
-	
-	// bottom boundary
-	Real p_ijm1;
-	Real G_ijm1;
-	if (((2 * row) + ((col + 1) & 1)) == 0) {
-		p_ijm1 = p_ij;
-		G_ijm1 = ZERO;
-	} else {
-		p_ijm1 = pres_red[(col * (NUM >> 1)) + row - (col & 1)];
-		G_ijm1 = G[(col * NUM) + (2 * row) + ((col + 1) & 1) - 1];
-	}
-	
-	// top boundary
-	Real p_ijp1;
-	if (((2 * row) + ((col + 1) & 1)) == (NUM - 1)) {
-		p_ijp1 = p_ij;
-	} else {
-		p_ijp1 = pres_red[(col * (NUM >> 1)) + row + ((col + 1) & 1)];
-	}
+	Real p_ij = pres_black(col, row);
+
+	Real p_im1j = pres_red(col - 1, row);
+	Real p_ip1j = pres_red(col + 1, row);
+	Real p_ijm1 = pres_red(col, row - ((col + 1) & 1));
+	Real p_ijp1 = pres_red(col, row + (col & 1));
 	
 	// right-hand side
-	Real rhs = (((F[ind] - F_im1j) / dx) + ((G[ind] - G_ijm1) / dy)) / dt;
+	Real rhs = (((F(col, (2 * row) - ((col + 1) & 1))
+			 	- F(col - 1, (2 * row) - ((col + 1) & 1))) / dx)
+			  + ((G(col, (2 * row) - ((col + 1) & 1))
+			    - G(col, (2 * row) - ((col + 1) & 1) - 1)) / dy)) / dt;
 	
-	pres_black[ind_black] = p_ij * (ONE - omega) + omega * (
-										  		((p_ip1j + p_im1j) / (dx * dx)) + ((p_ijp1 + p_ijm1) / (dy * dy)) - 
-										  		rhs) / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
-	
-	// calculate residual (reuse rhs variable)
-	rhs = ((p_ip1j - (TWO * p_ij) + p_im1j) / (dx * dx)) + ((p_ijp1 - (TWO * p_ij) + p_ijm1) / (dy * dy)) - rhs;
-	
-	#ifdef SHARED
-		// store residual for block
-		__shared__ Real res_cache[BLOCK_SIZE];
-	
-		// store squared residual from each thread
-		res_cache[threadIdx.y] = rhs * rhs;
-	
-		// synchronize threads in block
-		__syncthreads();
-	
-		// add up squared residuals for block
-		int i = BLOCK_SIZE >> 1;
-		while (i != 0) {
-			if (threadIdx.y < i) {
-				res_cache[threadIdx.y] += res_cache[threadIdx.y + i];
-			}
-			__syncthreads();
-			i >>= 1;
-		}
-	
-		// store block's summed residuals
-		if (threadIdx.y == 0) {
-			#ifdef ATOMIC
-				atomicAdd (norm_L2, res_cache[0]);
-			#else
-				norm_L2[blockIdx.x + (gridDim.x * blockIdx.y)] = res_cache[0];
-			#endif
-		}
-	#else
-		norm_L2[ind_black] = rhs * rhs;
-	#endif
+	pres_black(col, row) = p_ij * (ONE - omega) + omega * 
+		(((p_ip1j + p_im1j) / (dx * dx)) + ((p_ijp1 + p_ijm1) / (dy * dy)) - 
+		rhs) / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
 	
 } // end black_kernel
 
 ///////////////////////////////////////////////////////////////////////////////
 
-__global__ 
-void calculate_u (const Real dt, const Real * F, 
-									const Real * pres_red, const Real * pres_black, 
-									#ifdef ATOMIC
-									Real * u, unsigned int * max_u_d)
-									#else
-									Real * u, Real * max_u_d)
-									#endif
+__global__
+void calc_residual (const Real dt, const Real* F, const Real* G, 
+					const Real* pres_red, const Real* pres_black,
+					Real* res_array)
 {
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	#ifdef SHARED
-		#ifdef ATOMIC
-			__shared__ unsigned int res_cache[BLOCK_SIZE];
-			res_cache[threadIdx.y] = 0;
-		#else
-			__shared__ Real res_cache[BLOCK_SIZE];
-			res_cache[threadIdx.y] = ZERO;
-		#endif
-	#endif
+	int NUM_2 = NUM >> 1;
+
+	Real p_ij, p_im1j, p_ip1j, p_ijm1, p_ijp1, rhs, res, res2;
+
+	// red point
+	p_ij = pres_red(col, row);
 	
-	if (col != (NUM - 1)) {
-		int ind = (col * NUM) + row;
-		
-		Real p_ij, p_ip1j;
-		if (((row + col) & 1) == 0) {
-			// red pressure cell
-			p_ij = pres_red[(col * (NUM >> 1)) + ((row - (col & 1)) >> 1)];
-			
-			// p_ip1j is black cell
-			p_ip1j = pres_black[((col + 1) * (NUM >> 1)) + ((row - (col & 1)) >> 1)];
-		} else {
-			// black pressure cell
-			p_ij = pres_black[(col * (NUM >> 1)) + ((row - ((col + 1) & 1)) >> 1)];
-			
-			// p_ip1j is red cell
-			p_ip1j = pres_red[((col + 1) * (NUM >> 1)) + ((row - ((col + 1) & 1)) >> 1)];
+	p_im1j = pres_black(col - 1, row);
+	p_ip1j = pres_black(col + 1, row);
+	p_ijm1 = pres_black(col, row - (col & 1));
+	p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+
+	rhs = (((F(col, (2 * row) - (col & 1)) - F(col - 1, (2 * row) - (col & 1))) / dx)
+		+  ((G(col, (2 * row) - (col & 1)) - G(col, (2 * row) - (col & 1) - 1)) / dy)) / dt;
+
+	// calculate residual
+	res = ((p_ip1j - (TWO * p_ij) + p_im1j) / (dx * dx))
+		+ ((p_ijp1 - (TWO * p_ij) + p_ijm1) / (dy * dy)) - rhs;
+
+	// black point
+	p_ij = pres_black(col, row);
+
+	p_im1j = pres_red(col - 1, row);
+	p_ip1j = pres_red(col + 1, row);
+	p_ijm1 = pres_red(col, row - ((col + 1) & 1));
+	p_ijp1 = pres_red(col, row + (col & 1));
+	
+	// right-hand side
+	rhs = (((F(col, (2 * row) - ((col + 1) & 1)) - F(col - 1, (2 * row) - ((col + 1) & 1))) / dx)
+		+  ((G(col, (2 * row) - ((col + 1) & 1)) - G(col, (2 * row) - ((col + 1) & 1) - 1)) / dy)) / dt;
+
+	// calculate residual
+	res2 = ((p_ip1j - (TWO * p_ij) + p_im1j) / (dx * dx))
+		 + ((p_ijp1 - (TWO * p_ij) + p_ijm1) / (dy * dy)) - rhs;
+
+	// shared memory for block's sum
+	__shared__ Real sum_cache[BLOCK_SIZE];
+
+	sum_cache[threadIdx.x] = (res * res) + (res2 * res2);
+
+	// synchronize threads in block to ensure all residuals stored
+	__syncthreads();
+
+	// add up squared residuals for block
+	int i = BLOCK_SIZE >> 1;
+	while (i != 0) {
+		if (threadIdx.x < i) {
+			sum_cache[threadIdx.x] += sum_cache[threadIdx.x + i];
 		}
-		
-		//u[ind] = F[ind] - (dt * (p_ip1j - p_ij) / dx);
-		Real u_ij = F[ind] - (dt * (p_ip1j - p_ij) / dx);
-		
-		u[ind] = u_ij;
-		
-		#ifdef SHARED
-		// store maximum u for block from each thread
-			#ifdef ATOMIC
-				res_cache[threadIdx.y] = floatFlip (fabs(u_ij));
-			#else
-				res_cache[threadIdx.y] = fabs(u_ij);
-			#endif
-		
-		// synchronize threads in block
 		__syncthreads();
+		i >>= 1;
+	}
 
-		// add up squared residuals for block
-		int i = BLOCK_SIZE >> 1;
-		while (i != 0) {
-			if (threadIdx.y < i) {
-				res_cache[threadIdx.y] = fmax(res_cache[threadIdx.y], res_cache[threadIdx.y + i]);
-			}
-			__syncthreads();
-			i >>= 1;
-		}
+	// store block's summed residuals
+	if (threadIdx.x == 0) {
+		res_array[blockIdx.y + (gridDim.y * blockIdx.x)] = sum_cache[0];
+	}
+} 
 
-		// store block's summed residuals
-		if (threadIdx.y == 0) {
-			#ifdef ATOMIC
-				atomicMax (max_u_d, res_cache[0]);
-			#else
-				max_u_d[blockIdx.x + (gridDim.x * blockIdx.y)] = res_cache[0];
-			#endif
+///////////////////////////////////////////////////////////////////////////////
+
+__global__ 
+void calculate_u (const Real dt, const Real* F, 
+				  const Real* pres_red, const Real* pres_black, 
+				  Real* u, Real* max_u)
+{
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
+	
+	// allocate shared memory to store max velocities
+	__shared__ Real max_cache[BLOCK_SIZE];
+	max_cache[threadIdx.x] = ZERO;
+	
+	int NUM_2 = NUM >> 1;
+	Real new_u = ZERO;
+
+	if (col != NUM) {
+
+		Real p_ij, p_ip1j, new_u2;
+
+		// red point
+		p_ij = pres_red(col, row);
+		p_ip1j = pres_black(col + 1, row);
+
+		new_u = F(col, (2 * row) - (col & 1)) - (dt * (p_ip1j - p_ij) / dx);
+		u(col, (2 * row) - (col & 1)) = new_u;
+
+		// black point
+		p_ij = pres_black(col, row);
+		p_ip1j = pres_red(col + 1, row);
+
+		new_u2 = F(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ip1j - p_ij) / dx);
+		u(col, (2 * row) - ((col + 1) & 1)) = new_u2;
+
+		// check for max of these two
+		new_u = fmax(fabs(new_u), fabs(new_u2));
+
+		if ((2 * row) == NUM) {
+			// also test for max velocity at vertical boundary
+			new_u = fmax(new_u, fabs( u(col, NUM + 1) ));
 		}
-		#endif
+	} else {
+		// check for maximum velocity in boundary cells also
+		new_u = fmax(fabs( u(NUM, (2 * row)) ), fabs( u(0, (2 * row)) ));
+		new_u = fmax(fabs( u(NUM, (2 * row) - 1) ), new_u);
+		new_u = fmax(fabs( u(0, (2 * row) - 1) ), new_u);
+
+		new_u = fmax(fabs( u(NUM + 1, (2 * row)) ), new_u);
+		new_u = fmax(fabs( u(NUM + 1, (2 * row) - 1) ), new_u);
+
 	} // end if
+
+	// store maximum u for block from each thread
+	max_cache[threadIdx.x] = new_u;
+
+	// synchronize threads in block to ensure all velocities stored
+	__syncthreads();
+
+	// calculate maximum for block
+	int i = BLOCK_SIZE >> 1;
+	while (i != 0) {
+		if (threadIdx.x < i) {
+			max_cache[threadIdx.x] = fmax(max_cache[threadIdx.x], max_cache[threadIdx.x + i]);
+		}
+		__syncthreads();
+		i >>= 1;
+	}
+
+	// store block's maximum
+	if (threadIdx.x == 0) {
+		max_u[blockIdx.y + (gridDim.y * blockIdx.x)] = max_cache[0];
+	}
+
 	
 } // end calculate_u
 
 ///////////////////////////////////////////////////////////////////////////////
 
 __global__ 
-void calculate_v (const Real dt, const Real * G, 
-									const Real * pres_red, const Real * pres_black, 
-									#ifdef ATOMIC
-									Real * v, unsigned int * max_v_d)
-									#else
-									Real * v, Real * max_v_d)
-									#endif
+void calculate_v (const Real dt, const Real* G, 
+				  const Real* pres_red, const Real* pres_black, 
+				  Real* v, Real* max_v)
 {
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int row = (blockIdx.x * blockDim.x) + threadIdx.x + 1;
+	int col = (blockIdx.y * blockDim.y) + threadIdx.y + 1;
 	
-	#ifdef SHARED
-		#ifdef ATOMIC
-			__shared__ unsigned int res_cache[BLOCK_SIZE];
-			res_cache[threadIdx.y] = 0;
-		#else
-			__shared__ Real res_cache[BLOCK_SIZE];
-			res_cache[threadIdx.y] = ZERO;
-		#endif
-	#endif
+	// allocate shared memory to store maximum velocities
+	__shared__ Real max_cache[BLOCK_SIZE];
+	max_cache[threadIdx.x] = ZERO;
+
+	int NUM_2 = NUM >> 1;
+	Real new_v = ZERO;
 	
-	if (row != (NUM - 1)) {
-		int ind = (col * NUM) + row;
+	if (row != NUM_2) {
+		Real p_ij, p_ijp1, new_v2;
+
+		// red pressure point
+		p_ij = pres_red(col, row);
+		p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+	
+		new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+		v(col, (2 * row) - (col & 1)) = new_v;
+
+
+		// black pressure point
+		p_ij = pres_black(col, row);
+		p_ijp1 = pres_red(col, row + (col & 1));
 		
-		Real p_ij, p_ijp1;
-		if (((row + col) & 1) == 0) {
-			// red pressure cell
-			p_ij = pres_red[(col * (NUM >> 1)) + ((row - (col & 1)) >> 1)];
-			
-			// p_ijp1 is black cell
-			p_ijp1 = pres_black[(col * (NUM >> 1)) + ((row + 1 - ((col + 1) & 1)) >> 1)];
+		new_v2 = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+		v(col, (2 * row) - ((col + 1) & 1)) = new_v2;
+
+
+		// check for max of these two
+		new_v = fmax(fabs(new_v), fabs(new_v2));
+
+		if (col == NUM) {
+			// also test for max velocity at vertical boundary
+			new_v = fmax(new_v, fabs( v(NUM + 1, (2 * row)) ));
+		}
+
+	} else {
+
+		if ((col & 1) == 1) {
+			// black point is on boundary, only calculate red point below it
+			Real p_ij = pres_red(col, row);
+			Real p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+		
+			new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - (col & 1)) = new_v;
+
 		} else {
-			// black pressure cell
-			p_ij = pres_black[(col * (NUM >> 1)) + ((row - ((col + 1) & 1)) >> 1)];
-			
-			// p_ijp1 is red cell
-			p_ijp1 = pres_red[(col * (NUM >> 1)) + ((row + 1 - (col & 1)) >> 1)];
-		}
+			// red point is on boundary, only calculate black point below it
+			Real p_ij = pres_black(col, row);
+			Real p_ijp1 = pres_red(col, row + (col & 1));
 		
-		//v[ind] = G[ind] - (dt * (p_ijp1 - p_ij) / dy);
-		Real v_ij = G[ind] - (dt * (p_ijp1 - p_ij) / dy);
-		
-		v[ind] = v_ij;
-		
-		#ifdef SHARED
-		// store maximum v for block for each thread
-		
-			#ifdef ATOMIC
-				res_cache[threadIdx.y] = floatFlip (fabs(v_ij));
-			#else
-				res_cache[threadIdx.y] = fabs(v_ij);
-			#endif
-		
-		// synchronize threads in block
-		__syncthreads();
-
-		// add up squared residuals for block
-		int i = BLOCK_SIZE >> 1;
-		while (i != 0) {
-			if (threadIdx.y < i) {
-				res_cache[threadIdx.y] = fmax(res_cache[threadIdx.y], res_cache[threadIdx.y + i]);
-			}
-			__syncthreads();
-			i >>= 1;
+			new_v = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - ((col + 1) & 1)) = new_v;
 		}
 
-		// store block's summed residuals
-		if (threadIdx.y == 0) {
-			#ifdef ATOMIC
-				atomicMax (max_v_d, res_cache[0]);
-			#else
-				max_v_d[blockIdx.x + (gridDim.x * blockIdx.y)] = res_cache[0];
-			#endif
-		}
-		#endif
+		// get maximum v velocity
+		new_v = fabs(new_v);
+
+		// check for maximum velocity in boundary cells also
+		new_v = fmax(fabs( v(col, NUM) ), new_v);
+		new_v = fmax(fabs( v(col, 0) ), new_v);
+
+		new_v = fmax(fabs( v(col, NUM + 1) ), new_v);
+
 	} // end if
+		
+	// store absolute value of velocity
+	max_cache[threadIdx.x] = new_v;
+	
+	// synchronize threads in block to ensure all velocities stored
+	__syncthreads();
+
+	// calculate maximum for block
+	int i = BLOCK_SIZE >> 1;
+	while (i != 0) {
+		if (threadIdx.x < i) {
+			max_cache[threadIdx.x] = fmax(max_cache[threadIdx.x], max_cache[threadIdx.x + i]);
+		}
+		__syncthreads();
+		i >>= 1;
+	}
+
+	// store block's summed residuals
+	if (threadIdx.x == 0) {
+		max_v[blockIdx.y + (gridDim.y * blockIdx.x)] = max_cache[0];
+	}
 	
 } // end calculate_v
 
@@ -645,8 +729,8 @@ void calculate_v (const Real dt, const Real * G,
 int main (void)
 {
 	// iterations for Red-Black Gauss-Seidel with SOR
-	uint iter = 0;
-	const uint it_max = 10000;
+	int iter = 0;
+	const int it_max = 10000;
 	
 	// SOR iteration tolerance
 	const Real tol = 0.001;
@@ -657,116 +741,155 @@ int main (void)
 	
 	// initial time step size
 	Real dt = 0.02;
-	
-	uint size = NUM * NUM;
-	uint size_pres = (NUM / 2) * NUM;
+
+	int size = (NUM + 2) * (NUM + 2);
+	int size_pres = ((NUM / 2) + 2) * (NUM + 2);
 	
 	// arrays for pressure and velocity
-	Real *F, *u;
-	Real *G, *v;
+	Real* F;
+	Real* u;
+	Real* G;
+	Real* v;
 	
-	F = (Real *) calloc ((NUM + 1) * NUM, sizeof(Real));
-	u = (Real *) calloc ((NUM + 1) * NUM, sizeof(Real));
-	G = (Real *) calloc ((NUM + 1) * NUM, sizeof(Real));
-	v = (Real *) calloc ((NUM + 1) * NUM, sizeof(Real));
+	F = (Real *) calloc (size, sizeof(Real));
+	u = (Real *) calloc (size, sizeof(Real));
+	G = (Real *) calloc (size, sizeof(Real));
+	v = (Real *) calloc (size, sizeof(Real));
 	
-	for (uint i = 0; i < size; ++i) {
-		F[i] = 0.0;
-		u[i] = 0.0;
-		G[i] = 0.0;
-		v[i] = 0.0;
+	for (int i = 0; i < size; ++i) {
+		F[i] = ZERO;
+		u[i] = ZERO;
+		G[i] = ZERO;
+		v[i] = ZERO;
 	}
 	
 	// arrays for pressure
-	Real *pres_red, *pres_black;
+	Real* pres_red;
+	Real* pres_black;
 	
 	pres_red = (Real *) calloc (size_pres, sizeof(Real));
 	pres_black = (Real *) calloc (size_pres, sizeof(Real));
 	
-	for (uint i = 0; i < size_pres; ++i) {
-		pres_red[i] = 0.0;
-		pres_black[i] = 0.0;
+	for (int i = 0; i < size_pres; ++i) {
+		pres_red[i] = ZERO;
+		pres_black[i] = ZERO;
 	}
-	
-	////////////////////////////////////////
-	// allocate and transfer device memory
-	Real *u_d, *F_d, *v_d, *G_d;
-	Real *pres_red_d, *pres_black_d;
-	
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &u_d, size * sizeof(Real)));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &F_d, size * sizeof(Real)));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &v_d, size * sizeof(Real)));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &G_d, size * sizeof(Real)));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &pres_red_d, size_pres * sizeof(Real)));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &pres_black_d, size_pres * sizeof(Real)));
-	
-	// copy to device memory
-	CUDA_SAFE_CALL (cudaMemcpy (u_d, u, size * sizeof(Real), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL (cudaMemcpy (F_d, F, size * sizeof(Real), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL (cudaMemcpy (v_d, v, size * sizeof(Real), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL (cudaMemcpy (G_d, G, size * sizeof(Real), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL (cudaMemcpy (pres_red_d, pres_red, size_pres * sizeof(Real), cudaMemcpyHostToDevice));
-	CUDA_SAFE_CALL (cudaMemcpy (pres_black_d, pres_black, size_pres * sizeof(Real), cudaMemcpyHostToDevice));
+
+	// set device
+	checkCudaErrors(cudaSetDevice (1));
+
+	// print problem size
+	printf("Problem size: %d x %d \n", NUM, NUM);
 	
 	////////////////////////////////////////
 	// block and grid dimensions
+
+	// boundary conditions kernel
+	dim3 block_bcs (BLOCK_SIZE, 1);
+	dim3 grid_bcs (NUM / BLOCK_SIZE, 1);
+
+	// pressure kernel
+	dim3 block_pr (BLOCK_SIZE, 1);
+	dim3 grid_pr (NUM / (2 * BLOCK_SIZE), NUM);
+
+	// block and grid dimensions for F
+	dim3 block_F (BLOCK_SIZE, 1);
+	dim3 grid_F (NUM / BLOCK_SIZE, NUM);
+
+	// block and grid dimensions for G
+	dim3 block_G (BLOCK_SIZE, 1);
+	dim3 grid_G (NUM / BLOCK_SIZE, NUM);
 	
-	// block and grid dimensions for u and F
-	dim3 dimBlock_u (1, BLOCK_SIZE);
-	dim3 dimGrid_u (NUM, NUM / BLOCK_SIZE);
-	
-	// block and grid dimensions for v and G
-	dim3 dimBlock_v (1, BLOCK_SIZE);
-	dim3 dimGrid_v (NUM, NUM / BLOCK_SIZE);
-	
-	// block and grid dimensions for pressure
-	dim3 dimBlock_p (1, BLOCK_SIZE);
-	dim3 dimGrid_p (NUM, NUM / (2 * BLOCK_SIZE));
+	// horizontal pressure boundary conditions
+	dim3 block_hpbc (BLOCK_SIZE, 1);
+	dim3 grid_hpbc (NUM / (2 * BLOCK_SIZE), 1);
+
+	// vertical pressure boundary conditions
+	dim3 block_vpbc (BLOCK_SIZE, 1);
+	dim3 grid_vpbc (NUM / (2 * BLOCK_SIZE), 1);
+	///////////////////////////////////////////
 	
 	// residual variable
-	Real *res, *res_d;
-	#ifdef SHARED
-		#ifdef ATOMIC
-			uint size_res = 1;
-		#else
-			uint size_res = dimGrid_p.x * dimGrid_p.y;
-		#endif
-	#else
-		uint size_res = size_pres;
-	#endif
-	res = (Real *) malloc (size_res * sizeof(Real));
-	CUDA_SAFE_CALL (cudaMalloc ((void**) &res_d, size_res * sizeof(Real)));
+	Real* res;
+
+	int size_res = grid_pr.x * grid_pr.y;
+	res = (Real *) calloc (size_res, sizeof(Real));
 	
 	// variables to store maximum velocities
-	
-	#ifdef SHARED
-		#ifdef ATOMIC
-			unsigned int *max_u_arr, *max_v_arr;
-			unsigned int *max_u_d, *max_v_d;
-			uint size_max = 1;
-	
-			max_u_arr = (unsigned int *) malloc (size_max * sizeof(unsigned int));
-			CUDA_SAFE_CALL (cudaMalloc ((void**) &max_u_d, size_max * sizeof(unsigned int)));
-			max_v_arr = (unsigned int *) malloc (size_max * sizeof(unsigned int));
-			CUDA_SAFE_CALL (cudaMalloc ((void**) &max_v_d, size_max * sizeof(unsigned int)));
-		#else
-			Real *max_u_d, *max_v_d;
-			Real *max_u_arr, *max_v_arr;
-			uint size_max = dimGrid_u.x * dimGrid_u.y;
-	
-			max_u_arr = (Real *) malloc (size_max * sizeof(Real));
-			CUDA_SAFE_CALL (cudaMalloc ((void**) &max_u_d, size_max * sizeof(Real)));
-			max_v_arr = (Real *) malloc (size_max * sizeof(Real));
-			CUDA_SAFE_CALL (cudaMalloc ((void**) &max_v_d, size_max * sizeof(Real)));
-		#endif
-	#else
-		Real *max_u_d, *max_v_d;
-	#endif
+	Real* max_u_arr;
+	Real* max_v_arr;
+	int size_max = grid_pr.x * grid_pr.y;
+
+	max_u_arr = (Real *) calloc (size_max, sizeof(Real));
+	max_v_arr = (Real *) calloc (size_max, sizeof(Real));
+
+	// pressure sum
+	Real* pres_sum;
+	pres_sum = (Real *) calloc (size_res, sizeof(Real));
 	
 	//////////////////////////////
 	// start timer
-	clock_t start_time = clock();
+	StartTimer();
 	//////////////////////////////
+
+	// set initial BCs
+	set_BCs_host (u, v);
+
+	Real max_u = SMALL;
+	Real max_v = SMALL;
+	// get max velocity for initial values (including BCs)
+	#pragma unroll
+	for (int col = 0; col < NUM + 2; ++col) {
+		#pragma unroll
+		for (int row = 1; row < NUM + 2; ++row) {
+			max_u = fmax(max_u, fabs( u(col, row) ));
+		}
+	}
+
+	#pragma unroll
+	for (int col = 1; col < NUM + 2; ++col) {
+		#pragma unroll
+		for (int row = 0; row < NUM + 2; ++row) {
+			max_v = fmax(max_v, fabs( v(col, row) ));
+		}
+	}
+
+	////////////////////////////////////////
+	// allocate and transfer device memory
+	Real* u_d;
+	Real* F_d;
+	Real* v_d;
+	Real* G_d;
+
+	Real* pres_red_d;
+	Real* pres_black_d;
+	Real* pres_sum_d;
+	Real* res_d;
+
+	Real* max_u_d;
+	Real* max_v_d;
+
+	cudaMalloc ((void**) &u_d, size * sizeof(Real));
+	cudaMalloc ((void**) &F_d, size * sizeof(Real));
+	cudaMalloc ((void**) &v_d, size * sizeof(Real));
+	cudaMalloc ((void**) &G_d, size * sizeof(Real));
+
+	cudaMalloc ((void**) &pres_red_d, size_pres * sizeof(Real));
+	cudaMalloc ((void**) &pres_black_d, size_pres * sizeof(Real));
+
+	cudaMalloc ((void**) &pres_sum_d, size_res * sizeof(Real));
+	cudaMalloc ((void**) &res_d, size_res * sizeof(Real));
+	cudaMalloc ((void**) &max_u_d, size_max * sizeof(Real));
+	cudaMalloc ((void**) &max_v_d, size_max * sizeof(Real));
+	
+	// copy to device memory
+	cudaMemcpy (u_d, u, size * sizeof(Real), cudaMemcpyHostToDevice);
+	cudaMemcpy (F_d, F, size * sizeof(Real), cudaMemcpyHostToDevice);
+	cudaMemcpy (v_d, v, size * sizeof(Real), cudaMemcpyHostToDevice);
+	cudaMemcpy (G_d, G, size * sizeof(Real), cudaMemcpyHostToDevice);
+	cudaMemcpy (pres_red_d, pres_red, size_pres * sizeof(Real), cudaMemcpyHostToDevice);
+	cudaMemcpy (pres_black_d, pres_black, size_pres * sizeof(Real), cudaMemcpyHostToDevice);
+	////////////////////////////////////////
 	
 	Real time = time_start;
 	
@@ -776,147 +899,137 @@ int main (void)
 	// time iteration loop
 	while (time < time_end) {
 		
-		// increase time
-		time += dt;
+		// calculate time step based on stability and CFL
+		dt = fmin((dx / max_u), (dy / max_v));
+		dt = tau * fmin(dt_Re, dt);
+		
+		if ((time + dt) >= time_end) {
+			dt = time_end - time;
+		}
 		
 		// calculate F and G		
-		calculate_F <<<dimGrid_u, dimBlock_u>>> (u_d, v_d, dt, F_d);
-		calculate_G <<<dimGrid_v, dimBlock_v>>> (u_d, v_d, dt, G_d);
+		calculate_F <<<grid_F, block_F>>> (dt, u_d, v_d, F_d);
+		calculate_G <<<grid_G, block_G>>> (dt, u_d, v_d, G_d);
+
+		// get L2 norm of initial pressure
+		sum_pressure <<<grid_pr, block_pr>>> (pres_red_d, pres_black_d, pres_sum_d);
+		cudaMemcpy (pres_sum, pres_sum_d, size_res * sizeof(Real), cudaMemcpyDeviceToHost);
+
+		Real p0_norm = ZERO;
+		#pragma unroll
+		for (int i = 0; i < size_res; ++i) {
+			p0_norm += pres_sum[i];
+		}
 		
+		p0_norm = sqrt(p0_norm / ((Real)(NUM * NUM)));
+		if (p0_norm < 0.0001) {
+		   p0_norm = 1.0;
+		}
+
+		// ensure all kernels are finished
+		cudaDeviceSynchronize();
+
+		Real norm_L2;
 		
 		// calculate new pressure
 		// red-black Gauss-Seidel with SOR iteration loop
 		for (iter = 1; iter <= it_max; ++iter) {
 
-			Real norm_L2 = 0.0;
-			
-			#ifdef ATOMIC
-				// set device value to zero
-				*res = 0.0;
-				CUDA_SAFE_CALL (cudaMemcpy (res_d, res, sizeof(Real), cudaMemcpyHostToDevice));
-			#endif
+			// set pressure boundary conditions
+			set_horz_pres_BCs <<<grid_hpbc, block_hpbc>>> (pres_red_d, pres_black_d);
+			set_vert_pres_BCs <<<grid_vpbc, block_hpbc>>> (pres_red_d, pres_black_d);
+
+			// ensure kernel finished
+			cudaDeviceSynchronize();
 
 			// update red cells
-			red_kernel <<<dimGrid_p, dimBlock_p>>> (dt, F_d, G_d, pres_black_d, pres_red_d, res_d);
-			
-			#ifndef ATOMIC
-				// transfer residual value(s) back to CPU and add red cell contributions
-				CUDA_SAFE_CALL (cudaMemcpy (res, res_d, size_res * sizeof(Real), cudaMemcpyDeviceToHost));
-				for (uint i = 0; i < size_res; ++i) {
-					norm_L2 += res[i];
-				}
-			#endif
+			red_kernel <<<grid_pr, block_pr>>> (dt, F_d, G_d, pres_black_d, pres_red_d);
+
+			// ensure red kernel finished
+			cudaDeviceSynchronize();
 			
 			// update black cells
-			black_kernel <<<dimGrid_p, dimBlock_p>>> (dt, F_d, G_d, pres_red_d, pres_black_d, res_d);
+			black_kernel <<<grid_pr, block_pr>>> (dt, F_d, G_d, pres_red_d, pres_black_d);
+
+			// ensure red kernel finished
+			cudaDeviceSynchronize();
 			
-			// transfer residual value(s) back to CPU and add black cell contributions
-			CUDA_SAFE_CALL (cudaMemcpy (res, res_d, size_res * sizeof(Real), cudaMemcpyDeviceToHost));
-			#ifdef ATOMIC
-				norm_L2 = *res;
-			#else
-				for (uint i = 0; i < size_res; ++i) {
-					norm_L2 += res[i];
-				}
-			#endif
+			// calculate residual values
+			calc_residual <<<grid_pr, block_pr>>> (dt, F_d, G_d, pres_red_d, pres_black_d, res_d);
+
+			// transfer residual value(s) back to CPU
+			cudaMemcpy (res, res_d, size_res * sizeof(Real), cudaMemcpyDeviceToHost);
+
+			norm_L2 = ZERO;
+			#pragma unroll
+			for (int i = 0; i < size_res; ++i) {
+				norm_L2 += res[i];
+			}
 			
 			// calculate residual
-			norm_L2 = sqrt(norm_L2 / ((Real)size));
+			norm_L2 = sqrt(norm_L2 / ((Real)(NUM * NUM))) / p0_norm;
 			
 			// if tolerance has been reached, end SOR iterations
 			if (norm_L2 < tol) {
 				break;
 			}	
 		} // end for
-		
-		// calculate new u and v velocities
-		calculate_u <<<dimGrid_u, dimBlock_u>>> (dt, F_d, pres_red_d, pres_black_d, u_d, max_u_d);
-		calculate_v <<<dimGrid_v, dimBlock_v>>> (dt, G_d, pres_red_d, pres_black_d, v_d, max_v_d);
-		
-		// calculate new time step based on stability and CFL
-		
-		// need maximum u- and v- velocities
-		Real max_v = 0.0;
-		Real max_u = 0.0;
-		
-		#ifdef SHARED
-			#ifdef ATOMIC
-				CUDA_SAFE_CALL (cudaMemcpy (max_u_arr, max_u_d, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-				CUDA_SAFE_CALL (cudaMemcpy (max_v_arr, max_v_d, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-			
-				max_u = invFloatFlip (*max_u_arr);
-				max_v = invFloatFlip (*max_v_arr);
-			#else
-				CUDA_SAFE_CALL (cudaMemcpy (max_u_arr, max_u_d, size_max * sizeof(Real), cudaMemcpyDeviceToHost));
-				CUDA_SAFE_CALL (cudaMemcpy (max_v_arr, max_v_d, size_max * sizeof(Real), cudaMemcpyDeviceToHost));
-			
-				for (uint i = 0; i < size_max; ++i) {
-					Real test_u = max_u_arr[i];
-					max_u = MAX(max_u, test_u);
 
-					Real test_v = max_v_arr[i];
-					max_v = MAX(max_v, test_v);
-				}
-			#endif
-		#else
-			// transfer velocities back to CPU
-			CUDA_SAFE_CALL (cudaMemcpy (u, u_d, size * sizeof(Real), cudaMemcpyDeviceToHost));
-			CUDA_SAFE_CALL (cudaMemcpy (v, v_d, size * sizeof(Real), cudaMemcpyDeviceToHost));
+		printf("Time = %f, delt = %e, iter = %i, res = %e\n", time + dt, dt, iter, norm_L2);
 		
-			for (uint i = 0; i < NUM * NUM; ++i) {
-				Real test_u = fabs(u[i]);
-				max_u = MAX(max_u, test_u);
-			
-				Real test_v = fabs(v[i]);
-				max_v = MAX(max_v, test_v);
-			}
-		#endif
-		
-		max_u = MIN((dx / max_u), (dy / max_v));
-		dt = tau * MIN(dt_Re, max_u);
-		
-		if ((time + dt) >= time_end) {
-			dt = time_end - time;
+		// calculate new velocities and transfer maximums back
+
+		calculate_u <<<grid_pr, block_pr>>> (dt, F_d, pres_red_d, pres_black_d, u_d, max_u_d);
+		cudaMemcpy (max_u_arr, max_u_d, size_max * sizeof(Real), cudaMemcpyDeviceToHost);
+
+		calculate_v <<<grid_pr, block_pr>>> (dt, G_d, pres_red_d, pres_black_d, v_d, max_v_d);
+		cudaMemcpy (max_v_arr, max_v_d, size_max * sizeof(Real), cudaMemcpyDeviceToHost);
+	
+		// get maximum u- and v- velocities
+		max_v = SMALL;
+		max_u = SMALL;
+
+		#pragma unroll
+		for (int i = 0; i < size_max; ++i) {
+			Real test_u = max_u_arr[i];
+			max_u = fmax(max_u, test_u);
+
+			Real test_v = max_v_arr[i];
+			max_v = fmax(max_v, test_v);
 		}
-		
-		printf("Time: %f, iterations: %i\n", time, iter);
+
+		// set velocity boundary conditions
+		set_BCs <<<grid_bcs, block_bcs>>> (u_d, v_d);
+
+		cudaDeviceSynchronize();
+
+		// increase time
+		time += dt;
 		
 	} // end while
 	
 	// transfer final temperature values back
-	CUDA_SAFE_CALL (cudaMemcpy (u, u_d, size * sizeof(Real), cudaMemcpyDeviceToHost));
-	CUDA_SAFE_CALL (cudaMemcpy (v, v_d, size * sizeof(Real), cudaMemcpyDeviceToHost));
-	CUDA_SAFE_CALL (cudaMemcpy (pres_red, pres_red_d, size_pres * sizeof(Real), cudaMemcpyDeviceToHost));
-	CUDA_SAFE_CALL (cudaMemcpy (pres_black, pres_red_d, size_pres * sizeof(Real), cudaMemcpyDeviceToHost));
-	
-	// free device memory
-	CUDA_SAFE_CALL (cudaFree(u_d));
-	CUDA_SAFE_CALL (cudaFree(v_d));
-	CUDA_SAFE_CALL (cudaFree(F_d));
-	CUDA_SAFE_CALL (cudaFree(G_d));
-	CUDA_SAFE_CALL (cudaFree(pres_red_d));
-	CUDA_SAFE_CALL (cudaFree(pres_black_d));
-	
-	#ifdef SHARE
-		CUDA_SAFE_CALL (cudaFree(max_u_d));
-		CUDA_SAFE_CALL (cudaFree(max_v_d));
-	#endif
-	
+	cudaMemcpy (u, u_d, size * sizeof(Real), cudaMemcpyDeviceToHost);
+	cudaMemcpy (v, v_d, size * sizeof(Real), cudaMemcpyDeviceToHost);
+	cudaMemcpy (pres_red, pres_red_d, size_pres * sizeof(Real), cudaMemcpyDeviceToHost);
+	cudaMemcpy (pres_black, pres_black_d, size_pres * sizeof(Real), cudaMemcpyDeviceToHost);
+
+
 	/////////////////////////////////
 	// end timer
-	clock_t end_time = clock();
+	double runtime = GetTimer();
 	/////////////////////////////////
 	
 	printf("GPU:\n");
-	printf("Time: %f\n", (end_time - start_time) / (double)CLOCKS_PER_SEC);
+	printf("Total time: %f s\n", runtime / 1000);
 	
 	// write data to file
 	FILE * pfile;
 	pfile = fopen("velocity_gpu.dat", "w");
 	fprintf(pfile, "#x\ty\tu\tv\n");
 	if (pfile != NULL) {
-		for (uint row = 0; row < NUM; ++row) {
-			for (uint col = 0; col < NUM; ++col) {
+		for (int row = 0; row < NUM; ++row) {
+			for (int col = 0; col < NUM; ++col) {
 				
 				Real u_ij = u[(col * NUM) + row];
 				Real u_im1j;
@@ -944,6 +1057,18 @@ int main (void)
 	}
 	
 	fclose(pfile);
+
+	// free device memory
+	cudaFree(u_d);
+	cudaFree(v_d);
+	cudaFree(F_d);
+	cudaFree(G_d);
+	cudaFree(pres_red_d);
+	cudaFree(pres_black_d);
+	cudaFree(max_u_d);
+	cudaFree(max_v_d);
+	cudaFree(pres_sum_d);
+	cudaFree(res_d);
 	
 	free(pres_red);
 	free(pres_black);
@@ -952,12 +1077,12 @@ int main (void)
 	free(F);
 	free(G);
 	
-	#ifdef SHARED
-		free(max_u_arr);
-		free(max_v_arr);
-	#endif
+	free(max_u_arr);
+	free(max_v_arr);
+	free(res);
+	free(pres_sum);
 	
-	cudaDeviceReset();
+	checkCudaErrors (cudaDeviceReset());
 	
 	return 0;
 }
