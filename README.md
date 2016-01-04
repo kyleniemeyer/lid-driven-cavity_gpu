@@ -1,6 +1,6 @@
 lid-driven-cavity_gpu
 =====================
-[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.44332.svg)](http://dx.doi.org/10.5281/zenodo.44332)
+[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.44333.svg)](http://dx.doi.org/10.5281/zenodo.44333)
 
 
 Solves lid-driven cavity problem using finite difference method on GPU, with equivalent CPU version for comparison.
@@ -12,7 +12,7 @@ This software package is released under the modified BSD license, see LICENSE fo
 
 Citation
 --------
-If you use this software as part of a scholarly publication, please cite the software directly using the DOI: [10.5281/zenodo.44332](http://dx.doi.org/10.5281/zenodo.44332)
+If you use this software as part of a scholarly publication, please cite the software directly using the DOI: [10.5281/zenodo.44333](http://dx.doi.org/10.5281/zenodo.44333)
 
 Author
 ------
