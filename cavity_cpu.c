@@ -28,7 +28,7 @@
  #include "timer.h"
 
 /** Problem size along one side; total number of cells is this squared */
-#define NUM 256
+#define NUM 512
 
 /** Double precision */
 #define DOUBLE
@@ -41,23 +41,23 @@
 	#define TWO 2.0
  	#define FOUR 4.0
 
- 	#define SMALL 1.0e-10;
+ 	#define SMALL 1.0e-10
 
 	/** Reynolds number */
-	const Real Re_num = 1000.0;
+	#define Re_num 1000.0
 
 	/** SOR relaxation parameter */
-	const Real omega = 1.7;
+	#define omega 1.7
 
 	/** Discretization mixture parameter (gamma) */
-	const Real mix_param = 0.9;
+	#define mix_param 0.9
 
 	/** Safety factor for time step modification */
-	const Real tau = 0.5;
+	#define tau 0.5
 
 	/** Body forces in x- and y- directions */
-	const Real gx = 0.0;
-	const Real gy = 0.0;
+	#define gx 0.0
+	#define gy 0.0
 
 	/** Domain size (non-dimensional) */
 	#define xLength 1.0
@@ -82,20 +82,20 @@
 	#define SMALL 1.0e-10f;
 
 		/** Reynolds number */
-	const Real Re_num = 1000.0f;
+	#define Re_num 1000.0f
 
 	/** SOR relaxation parameter */
-	const Real omega = 1.7f;
+	#define omega 1.7f
 
 	/** Discretization mixture parameter (gamma) */
-	const Real mix_param = 0.9f;
+	#define mix_param 0.9f
 
 	/** Safety factor for time step modification */
-	const Real tau = 0.5f;
+	#define tau 0.5f
 
 	/** Body forces in x- and y- directions */
-	const Real gx = 0.0f;
-	const Real gy = 0.0f;
+	#define gx 0.0f
+	#define gy 0.0f
 
 	/** Domain size (non-dimensional) */
 	#define xLength 1.0f
@@ -111,7 +111,7 @@
 #ifdef _OPENMP
 	#include <omp.h>
 #else
-	#define omp_get_max_threads() 1
+	#define omp_get_num_threads() 1
 #endif
 
 #if __STDC_VERSION__ < 199901L
@@ -125,11 +125,11 @@
 //#define MIN(a,b)  __extension__({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
 /** Mesh sizes */
-const Real dx = xLength / NUM;
-const Real dy = yLength / NUM;
+#define dx (xLength / NUM)
+#define dy (yLength / NUM)
 
-#define SIZE (NUM * NUM + 4 * NUM + 4)
-#define SIZEP (NUM * NUM / 2 + 3 * NUM + 4)
+#define SIZE ((NUM * NUM) + (4 * NUM) + 4)
+#define SIZEP ((NUM * NUM / 2) + (3 * NUM) + 4)
 
 // map two-dimensional indices to one-dimensional memory
 #define u(I, J) u[((I) * ((NUM) + 2)) + (J)]
@@ -146,8 +146,12 @@ void set_BCs (Real* restrict u, Real* restrict v)
 
 	// loop through rows
 	#pragma omp parallel for shared(u, v) private(row)
-	#pragma acc kernels present(u[0:SIZE], v[0:SIZE])
-	#pragma acc loop independent
+	//#pragma acc kernels present(u[0:SIZE], v[0:SIZE])
+	#pragma acc parallel present(u[0:SIZE], v[0:SIZE]) private(row, col)
+	#ifdef _OPENACC
+	{
+	#endif
+	#pragma acc loop
 	for (row = 0; row < NUM + 2; ++row) {
 
 		// left boundary
@@ -161,8 +165,8 @@ void set_BCs (Real* restrict u, Real* restrict v)
 	} // end for row
 
 	#pragma omp parallel for shared(u, v) private(col)
-	#pragma acc kernels present(u[0:SIZE], v[0:SIZE])
-	#pragma acc loop independent
+	//#pragma acc kernels present(u[0:SIZE], v[0:SIZE])
+	#pragma acc loop
 	for (col = 0; col < NUM + 2; ++col) {
 
 		// bottom boundary
@@ -174,6 +178,9 @@ void set_BCs (Real* restrict u, Real* restrict v)
 		v(col, NUM) = ZERO;
 
 	} // end for col
+	#ifdef _OPENACC
+	}
+	#endif
 
 } // end set_BCs
 
@@ -184,7 +191,7 @@ void calculate_F (const Real dt, const Real* restrict u, const Real* restrict v,
 {	
 	int row, col;
 
-	#pragma omp parallel for shared(u, v, F) \
+	#pragma omp parallel for shared(dt, u, v, F) \
 			private(row, col)
 	#pragma acc kernels present(u[0:SIZE], v[0:SIZE], F[0:SIZE])
 	#pragma acc loop independent
@@ -239,7 +246,7 @@ void calculate_G (const Real dt, const Real* restrict u, const Real* restrict v,
 {
 	int col, row;
 
-	#pragma omp parallel for shared(u, v, G) \
+	#pragma omp parallel for shared(dt, u, v, G) \
 			private(col, row)
 	#pragma acc kernels present(u[0:SIZE], v[0:SIZE], G[0:SIZE])
 	#pragma acc loop independent
@@ -294,7 +301,9 @@ Real sum_pressure (const Real* restrict pres_red, const Real* restrict pres_blac
 	int row, col;
 	Real sum = ZERO;
 
-	#pragma omp parallel for shared(pres_black, pres_red) \
+	int NUM_2 = NUM >> 1;
+
+	#pragma omp parallel for shared(pres_black, pres_red, sum) \
 			reduction(+:sum) private(col, row)
 	#pragma acc kernels present(pres_red[0:SIZEP], pres_black[0:SIZEP])
 	#pragma acc loop independent
@@ -302,8 +311,6 @@ Real sum_pressure (const Real* restrict pres_red, const Real* restrict pres_blac
 		#pragma acc loop independent
 		for (row = 1; row < (NUM / 2) + 1; ++row) {
 			
-			int NUM_2 = NUM >> 1;
-
 			Real pres_r = pres_red(col, row);
 			Real pres_b = pres_black(col, row);
 
@@ -320,13 +327,16 @@ void set_pressure_BCs (Real* restrict pres_red, Real* restrict pres_black)
 {
 	int row, col;
 
+	int NUM_2 = NUM >> 1;
+
 	// loop over columns
 	#pragma omp parallel for shared(pres_black, pres_red) private(col)
-	#pragma acc kernels present(pres_black[0:SIZEP], pres_red[0:SIZEP])
-	#pragma acc loop independent
+	#pragma acc parallel present(pres_black[0:SIZEP], pres_red[0:SIZEP]) private(row, col)
+	#ifdef _OPENACC
+	{
+	#endif
+	#pragma acc loop
 	for (col = 1; col < NUM + 1; col += 2) {
-
-		int NUM_2 = NUM >> 1;
 
 		// p_i,0 = p_i,1
 		pres_black(col, 0) = pres_red(col, 1);
@@ -340,21 +350,22 @@ void set_pressure_BCs (Real* restrict pres_red, Real* restrict pres_black)
 
 	// loop over rows
 	#pragma omp parallel for shared(pres_black, pres_red) private(row)
-	#pragma acc kernels present(pres_black[0:SIZEP], pres_red[0:SIZEP])
-	#pragma acc loop independent
+	//#pragma acc kernels present(pres_black[0:SIZEP], pres_red[0:SIZEP])
+	#pragma acc loop
 	for (row = 1; row < (NUM / 2) + 1; ++row) {
-
-		int NUM_2 = NUM >> 1;
 
 		// p_0,j = p_1,j
 		pres_black(0, row) = pres_red(1, row);
 		pres_red(0, row) = pres_black(1, row);
 
 		// p_imax+1,j = p_imax,j
-		pres_black(NUM + 1, row) = pres_red(NUM, row);
-		pres_red(NUM + 1, row) = pres_black(NUM, row);
+		pres_black((NUM + 1), row) = pres_red(NUM, row);
+		pres_red((NUM + 1), row) = pres_black(NUM, row);
 
 	} // end for row
+	#ifdef _OPENACC
+	}
+	#endif
  
 } // end set_pressure_BCs
 
@@ -373,20 +384,19 @@ void red_kernel	(const Real dt, const Real* restrict F,
 				 const Real* restrict G, const Real* restrict pres_black,
 				 Real* restrict pres_red)
 {
-	//Real norm_L2 = ZERO;
 	int col, row;
+
+	int NUM_2 = NUM >> 1;
 	
 	// loop over actual cells, skip boundary cells
-	#pragma omp parallel for shared(F, G, pres_black, pres_red) \
-			reduction(+:norm_L2) private(col, row)
+	#pragma omp parallel for shared(dt, F, G, pres_black, pres_red) \
+			private(col, row)
 	#pragma acc kernels present(F[0:SIZE], G[0:SIZE], pres_black[0:SIZEP], pres_red[0:SIZEP])
 	#pragma acc loop independent
 	for (col = 1; col < NUM + 1; ++col) {
 		#pragma acc loop independent
 		for (row = 1; row < (NUM / 2) + 1; ++row) {
-
-			int NUM_2 = NUM >> 1;			
-			
+		
 			Real p_ij = pres_red(col, row);
 			
 			Real p_im1j = pres_black(col - 1, row);
@@ -424,19 +434,18 @@ void black_kernel (const Real dt, const Real* restrict F,
 				   const Real* restrict G, const Real* restrict pres_red, 
 				   Real* restrict pres_black)
 {
-	//Real norm_L2 = ZERO;
 	int col, row;
+
+	int NUM_2 = NUM >> 1;
 	
 	// loop over actual cells, skip boundary cells
-	#pragma omp parallel for shared(F, G, pres_black, pres_red) \
-			reduction(+:norm_L2) private(col, row)
+	#pragma omp parallel for shared(dt, F, G, pres_red, pres_black) \
+			private(col, row)
 	#pragma acc kernels present(F[0:SIZE], G[0:SIZE], pres_red[0:SIZEP], pres_black[0:SIZEP])
 	#pragma acc loop independent
 	for (col = 1; col < NUM + 1; ++col) {
 		#pragma acc loop independent
 		for (row = 1; row < (NUM / 2) + 1; ++row) {
-
-			int NUM_2 = NUM >> 1;
 			
 			Real p_ij = pres_black(col, row);
 
@@ -450,14 +459,15 @@ void black_kernel (const Real dt, const Real* restrict F,
 					 	- F(col - 1, (2 * row) - ((col + 1) & 1))) / dx)
 					  + ((G(col, (2 * row) - ((col + 1) & 1))
 					    - G(col, (2 * row) - ((col + 1) & 1) - 1)) / dy)) / dt;
-			
+	
 			pres_black(col, row) = p_ij * (ONE - omega) + omega * 
-				(((p_ip1j + p_im1j) / (dx * dx)) + ((p_ijp1 + p_ijm1) / (dy * dy)) - 
-				rhs) / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
+								   (((p_ip1j + p_im1j) / (dx * dx))
+								 + ((p_ijp1 + p_ijm1) / (dy * dy)) - rhs)
+								 / ((TWO / (dx * dx)) + (TWO / (dy * dy)));
 			
 		} // end for row
 	} // end for col
-
+	
 } // end black_kernel
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -468,11 +478,11 @@ void SOR (const Real dt, const Real* restrict F, const Real* restrict G,
 	Real norm_L2 = ZERO;
 	int col, row;
 	
+	int NUM_2 = NUM >> 1;
+
 	// loop over actual cells, skip boundary cells
 	for (col = 1; col < NUM + 1; ++col) {
 		for (row = 1; row < NUM + 1; ++row) {
-
-			int NUM_2 = NUM >> 1;
 
 			Real p_ij, p_im1j, p_ip1j, p_ijm1, p_ijp1, rhs;
 
@@ -526,7 +536,9 @@ Real calc_residual (const Real dt, const Real* restrict F, const Real* restrict 
 	int row, col;
 	Real residual = ZERO;
 
-	#pragma omp parallel for shared(F, G, pres_red, pres_black) \
+	int NUM_2 = NUM >> 1;
+
+	#pragma omp parallel for shared(dt, F, G, pres_red, pres_black, residual) \
 			reduction(+:residual) private(col, row)
 	#pragma acc kernels present(F[0:SIZE], G[0:SIZE], pres_red[0:SIZEP], pres_black[0:SIZEP])
 	#pragma acc loop independent
@@ -534,13 +546,11 @@ Real calc_residual (const Real dt, const Real* restrict F, const Real* restrict 
 		#pragma acc loop independent
 		for (row = 1; row < (NUM / 2) + 1; ++row) {
 
-			int NUM_2 = NUM >> 1;
-
 			Real p_ij, p_im1j, p_ip1j, p_ijm1, p_ijp1, rhs, res, res2;
 
 			// red point
 			p_ij = pres_red(col, row);
-			
+
 			p_im1j = pres_black(col - 1, row);
 			p_ip1j = pres_black(col + 1, row);
 			p_ijm1 = pres_black(col, row - (col & 1));
@@ -559,8 +569,8 @@ Real calc_residual (const Real dt, const Real* restrict F, const Real* restrict 
 			p_im1j = pres_red(col - 1, row);
 			p_ip1j = pres_red(col + 1, row);
 			p_ijm1 = pres_red(col, row - ((col + 1) & 1));
-			p_ijp1 = pres_red(col, row + (col & 1));
-			
+			p_ijp1 = pres_red(col, row + (col & 1));	
+
 			// right-hand side
 			rhs = (((F(col, (2 * row) - ((col + 1) & 1)) - F(col - 1, (2 * row) - ((col + 1) & 1))) / dx)
 				+  ((G(col, (2 * row) - ((col + 1) & 1)) - G(col, (2 * row) - ((col + 1) & 1) - 1)) / dy)) / dt;
@@ -585,61 +595,67 @@ Real calculate_u (const Real dt, const Real* restrict F,
 {
 	Real max_u = SMALL;
 	int col, row;
+
+	int NUM_2 = NUM >> 1;
 	
 	// loop over actual cells, skip boundary cells
-	#pragma omp parallel for shared(F, pres_black, pres_red, u, max_u) \
+	#pragma omp parallel for shared(dt, F, pres_black, pres_red, u, max_u) \
 			private(col, row)
 	#pragma acc kernels present(F[0:SIZE], pres_red[0:SIZEP], pres_black[0:SIZEP], u[0:SIZE])
 	#pragma acc loop independent
-	for (col = 1; col < NUM + 1 ; ++col) {
+	//for (col = 1; col < NUM + 1 ; ++col) {
+	for (col = 1; col < NUM; ++col) {
 		#pragma acc loop independent
 		for (row = 1; row < (NUM / 2) + 1; ++row) {
 
-			if (col != NUM) {
-				
-				int NUM_2 = NUM >> 1;
+			Real p_ij, p_ip1j, new_u, new_u2;
 
-				Real p_ij, p_ip1j, new_u, new_u2;
+			// red point
+			p_ij = pres_red(col, row);
+			p_ip1j = pres_black(col + 1, row);
 
-				// red point
-				p_ij = pres_red(col, row);
-				p_ip1j = pres_black(col + 1, row);
+			new_u = F(col, (2 * row) - (col & 1)) - (dt * (p_ip1j - p_ij) / dx);
+			u(col, (2 * row) - (col & 1)) = new_u;
 
-				new_u = F(col, (2 * row) - (col & 1)) - (dt * (p_ip1j - p_ij) / dx);
-				u(col, (2 * row) - (col & 1)) = new_u;
+			// black point
+			p_ij = pres_black(col, row);
+			p_ip1j = pres_red(col + 1, row);
 
-				// black point
-				p_ij = pres_black(col, row);
-				p_ip1j = pres_red(col + 1, row);
+			new_u2 = F(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ip1j - p_ij) / dx);
+			u(col, (2 * row) - ((col + 1) & 1)) = new_u2;
 
-				new_u2 = F(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ip1j - p_ij) / dx);
-				u(col, (2 * row) - ((col + 1) & 1)) = new_u2;
+			// check for max of these two
+			new_u = fmax(fabs(new_u), fabs(new_u2));
 
-				// check for max of these two
-				new_u = fmax(fabs(new_u), fabs(new_u2));
+			if ((2 * row) == NUM) {
+				// also test for max velocity at vertical boundary
+				new_u = fmax(new_u, fabs( u(col, NUM + 1) ));
+			}
 
-				if ((2 * row) == NUM) {
-					// also test for max velocity at vertical boundary
-					new_u = fmax(new_u, fabs( u(col, NUM + 1) ));
-				}
-
-				// get maximum u velocity
-				max_u = fmax(max_u, new_u);
-
-			} else {
-				// check for maximum velocity in boundary cells also
-				Real test_u = fmax(fabs( u(NUM, (2 * row)) ), fabs( u(0, (2 * row)) ));
-				test_u = fmax(fabs( u(NUM, (2 * row) - 1) ), test_u);
-				test_u = fmax(fabs( u(0, (2 * row) - 1) ), test_u);
-
-				test_u = fmax(fabs( u(NUM + 1, (2 * row)) ), test_u);
-				test_u = fmax(fabs( u(NUM + 1, (2 * row) - 1) ), test_u);
-
-				max_u = fmax(max_u, test_u);
-			} // end if
+			// get maximum u velocity
+			max_u = fmax(max_u, new_u);
 
 		} // end for row
 	} // end for col
+
+	#pragma acc kernels present(u[0:SIZE])
+	#pragma acc loop independent
+	for (row = 1; row < (NUM / 2) + 1; ++row) {
+		col = NUM;
+
+		// check for maximum velocity in boundary cells also
+		Real test_u = fmax(fabs( u(NUM, (2 * row)) ), fabs( u(0, (2 * row)) ));
+		test_u = fmax(fabs( u(NUM, (2 * row) - 1) ), test_u);
+		test_u = fmax(fabs( u(0, (2 * row) - 1) ), test_u);
+
+		test_u = fmax(fabs( u(NUM + 1, (2 * row)) ), test_u);
+		test_u = fmax(fabs( u(NUM + 1, (2 * row) - 1) ), test_u);
+
+		max_u = fmax(max_u, test_u);
+	} // end for row
+
+
+
 	
 	return max_u;
 } // end calculate_u
@@ -652,82 +668,88 @@ Real calculate_v (const Real dt, const Real* restrict G,
 {
 	Real max_v = SMALL;
 	int col, row;
+
+	int NUM_2 = NUM >> 1;
 	
 	// loop over actual cells, skip boundary cells
-	#pragma omp parallel for shared(G, pres_black, pres_red, v, max_v) \
+	#pragma omp parallel for shared(dt, G, pres_black, pres_red, v, max_v, NUM_2) \
 			private(col, row)
 	#pragma acc kernels present(G[0:SIZE], pres_red[0:SIZEP], pres_black[0:SIZEP], v[0:SIZE])
 	#pragma acc loop independent
 	for (col = 1; col < NUM + 1; ++col) {
 		#pragma acc loop independent
-		for (row = 1; row < (NUM / 2) + 1; ++row) {
+		//for (row = 1; row < (NUM / 2) + 1; ++row) {
+		for (row = 1; row < (NUM / 2); ++row) {
 
-			int NUM_2 = NUM >> 1;
+			Real p_ij, p_ijp1, new_v, new_v2;
 
-			if (row != NUM_2) {
-				
-				Real p_ij, p_ijp1, new_v, new_v2;
+			// red pressure point
+			p_ij = pres_red(col, row);
+			p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+		
+			new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - (col & 1)) = new_v;
 
-				// red pressure point
-				p_ij = pres_red(col, row);
-				p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+
+			// black pressure point
+			p_ij = pres_black(col, row);
+			p_ijp1 = pres_red(col, row + (col & 1));
 			
-				new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
-				v(col, (2 * row) - (col & 1)) = new_v;
+			new_v2 = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - ((col + 1) & 1)) = new_v2;
 
 
-				// black pressure point
-				p_ij = pres_black(col, row);
-				p_ijp1 = pres_red(col, row + (col & 1));
-				
-				new_v2 = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
-				v(col, (2 * row) - ((col + 1) & 1)) = new_v2;
+			// check for max of these two
+			new_v = fmax(fabs(new_v), fabs(new_v2));
 
+			if (col == NUM) {
+				// also test for max velocity at vertical boundary
+				new_v = fmax(new_v, fabs( v(NUM + 1, (2 * row)) ));
+			}
 
-				// check for max of these two
-				new_v = fmax(fabs(new_v), fabs(new_v2));
-
-				if (col == NUM) {
-					// also test for max velocity at vertical boundary
-					new_v = fmax(new_v, fabs( v(NUM + 1, (2 * row)) ));
-				}
-
-				// get maximum v velocity
-				max_v = fmax(max_v, new_v);
-
-			} else {
-
-				Real new_v;
-
-				if ((col & 1) == 1) {
-					// black point is on boundary, only calculate red point below it
-					Real p_ij = pres_red(col, row);
-					Real p_ijp1 = pres_black(col, row + ((col + 1) & 1));
-				
-					new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
-					v(col, (2 * row) - (col & 1)) = new_v;
-				} else {
-					// red point is on boundary, only calculate black point below it
-					Real p_ij = pres_black(col, row);
-					Real p_ijp1 = pres_red(col, row + (col & 1));
-				
-					new_v = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
-					v(col, (2 * row) - ((col + 1) & 1)) = new_v;
-				}
-
-				// get maximum v velocity
-				Real test_v = fabs(new_v);
-
-				// check for maximum velocity in boundary cells also
-				test_v = fmax(fabs( v(col, NUM) ), test_v);
-				test_v = fmax(fabs( v(col, 0) ), test_v);
-
-				test_v = fmax(fabs( v(col, NUM + 1) ), test_v);
-
-				max_v = fmax(max_v, test_v);
-			} // end if
+			// get maximum v velocity
+			max_v = fmax(max_v, new_v);
 
 		} // end for row
+	} // end for col
+
+	row = NUM_2;
+
+	#pragma omp parallel for shared(dt, G, pres_black, pres_red, v, max_v, row, NUM_2) \
+			private(col)
+	#pragma acc kernels present(G[0:SIZE], pres_red[0:SIZEP], pres_black[0:SIZEP], v[0:SIZE])
+	#pragma acc loop independent
+	for (col = 1; col < NUM + 1; ++col) {
+
+		Real new_v;
+
+		if ((col % 2) == 1) {
+			// black point is on boundary, only calculate red point below it
+			Real p_ij = pres_red(col, row);
+			Real p_ijp1 = pres_black(col, row + ((col + 1) & 1));
+		
+			new_v = G(col, (2 * row) - (col & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - (col & 1)) = new_v;
+		} else {
+			// red point is on boundary, only calculate black point below it
+			Real p_ij = pres_black(col, row);
+			Real p_ijp1 = pres_red(col, row + (col & 1));
+		
+			new_v = G(col, (2 * row) - ((col + 1) & 1)) - (dt * (p_ijp1 - p_ij) / dy);
+			v(col, (2 * row) - ((col + 1) & 1)) = new_v;
+		}
+
+		// get maximum v velocity
+		Real test_v = fabs(new_v);
+
+		// check for maximum velocity in boundary cells also
+		test_v = fmax(fabs( v(col, NUM) ), test_v);
+		test_v = fmax(fabs( v(col, 0) ), test_v);
+
+		test_v = fmax(fabs( v(col, NUM + 1) ), test_v);
+
+		max_v = fmax(max_v, test_v);
+		
 	} // end for col
 	
 	return max_v;
@@ -735,12 +757,12 @@ Real calculate_v (const Real dt, const Real* restrict G,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-int main (void)
+int main (int argc, char *argv[])
 {
 	
 	// iterations for Red-Black Gauss-Seidel with SOR
 	int iter = 0;
-	const int it_max = 10000;
+	const int it_max = 100000;
 	
 	// SOR iteration tolerance
 	const Real tol = 0.001;
@@ -785,15 +807,51 @@ int main (void)
 		pres_black[i] = ZERO;
 	}
 
+	// set and initialize GPU, using device based on command line argument
 	#ifdef _OPENACC
-	// initialize device
-	acc_init(acc_device_nvidia);
-	acc_set_device_num(0, acc_device_nvidia);
+		acc_init (acc_device_nvidia);
+		int id = 0;
+
+		if (argc > 1) {
+			int num_devices = acc_get_num_devices (acc_device_nvidia);
+			id = *(argv[1]) - '0';
+
+			if ((id <= 0) || (id >= num_devices)) {
+				// not in range
+				printf("Error: GPU device number not in correct range\n");
+				printf("Provide number between 0 and %i\n", num_devices - 1);
+				exit(1);
+			}
+		}
+
+		acc_set_device_num (id, acc_device_nvidia);
 	#endif
+
+	// set number of threads for OpenMP based on command line argument
+	// if no argument, use the environment default (OMP_NUM_THREADS)
+	#ifdef _OPENMP
+		int max_threads = omp_get_max_threads ();
+		int num_threads = max_threads;
+
+		if (argc > 1) {
+			// first check if is number
+			num_threads = *(argv[1]) - '0';
+
+			if ((num_threads <= 0) || (num_threads > max_threads)) {
+				// not a digit, error
+				printf("Error: Number of threads not in correct range\n");
+				printf("Provide number between 1 and %i\n", max_threads);
+				exit(1);
+			}
+		}
+
+		omp_set_num_threads (num_threads);
+	#endif	
+
 
 	// print problem info
 	printf("Problem size: %d x %d \n", NUM, NUM);
-	printf("Max threads: %d\n", omp_get_max_threads());
+	printf("Num threads: %d\n", omp_get_num_threads());
 	
 	//////////////////////////////
 	// start timer
@@ -819,22 +877,22 @@ int main (void)
 
 	// get max velocities
 	int row, col;
-	#pragma omp parallel for shared(u) private(col, row)
+	//#pragma omp parallel for shared(u) private(col, row)
 	#pragma acc kernels present(u[0:SIZE])
 	#pragma acc loop independent
-	for (int col = 0; col < NUM + 2; ++col) {
+	for (col = 0; col < NUM + 2; ++col) {
 		#pragma acc loop independent
-		for (int row = 1; row < NUM + 2; ++row) {
+		for (row = 1; row < NUM + 2; ++row) {
 			max_u = fmax(max_u, fabs( u(col, row) ));
 		}
 	}
 
-	#pragma omp parallel for shared(v) private(col, row)
+	//#pragma omp parallel for shared(v) private(col, row)
 	#pragma acc kernels present(v[0:SIZE])
 	#pragma acc loop independent
-	for (int col = 1; col < NUM + 2; ++col) {
+	for (col = 1; col < NUM + 2; ++col) {
 		#pragma acc loop independent
-		for (int row = 0; row < NUM + 2; ++row) {
+		for (row = 0; row < NUM + 2; ++row) {
 			max_v = fmax(max_v, fabs( v(col, row) ));
 		}
 	}
@@ -849,10 +907,12 @@ int main (void)
 		if ((time + dt) >= time_end) {
 			dt = time_end - time;
 		}
-		
+
 		// calculate F and G
 		calculate_F (dt, u, v, F);
 		calculate_G (dt, u, v, G);
+
+		//#pragma acc wait
 		
 		/////////////////////////
 		// calculate new pressure
@@ -865,8 +925,6 @@ int main (void)
 		   p0_norm = 1.0;
 		}
 
-		//printf("p0: %e\n", p0_norm);
-
 		// red-black Gauss-Seidel with SOR iteration loop
 		Real norm_L2;
 		for (iter = 1; iter <= it_max; ++iter) {
@@ -877,21 +935,17 @@ int main (void)
 			set_pressure_BCs (pres_red, pres_black);
 
 			// update red cells
-			//norm_L2 += red_kernel (dt, F, G, pres_black, pres_red);
 			red_kernel (dt, F, G, pres_black, pres_red);
 
+
 			// update black cells
-			//norm_L2 += black_kernel (dt, F, G, pres_red, pres_black);
 			black_kernel (dt, F, G, pres_red, pres_black);
 
-			//norm_L2 += SOR (dt, F, G, pres_red, pres_black);
 			//SOR (dt, F, G, pres_red, pres_black);
 			norm_L2 = calc_residual (dt, F, G, pres_red, pres_black);
 			
 			// calculate residual
 			norm_L2 = sqrt(norm_L2 / ((Real)(NUM * NUM))) / p0_norm;
-
-			//printf(" %e\n", norm_L2);
 
 			// if tolerance has been reached, end SOR iterations
 			if (norm_L2 < tol) {
@@ -910,6 +964,9 @@ int main (void)
 
 		// increase time
 		time += dt;
+
+		// single time step
+		//break;
 		
 	} // end while
 	}
@@ -927,7 +984,7 @@ int main (void)
 	#else
 		printf("CPU\n");
 	#endif
-	//printf("Time: %f\n", (end_time - start_time) / (double)CLOCKS_PER_SEC);
+	
 	printf("Total time: %f s\n", runtime / 1000);
 	
 	

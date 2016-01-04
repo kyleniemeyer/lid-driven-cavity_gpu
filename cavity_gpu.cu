@@ -23,14 +23,14 @@
 #include <stdio.h>
 #include <math.h>
 
- #include "timer.h"
+#include "timer.h"
 
 // CUDA libraries
 #include <cuda.h>
 #include <helper_cuda.h>
 
 /** Problem size along one side; total number of cells is this squared */
-#define NUM 256
+#define NUM 512
 
 // block size
 #define BLOCK_SIZE 128
@@ -726,11 +726,11 @@ void calculate_v (const Real dt, const Real* G,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-int main (void)
+int main (int argc, char *argv[])
 {
 	// iterations for Red-Black Gauss-Seidel with SOR
 	int iter = 0;
-	const int it_max = 10000;
+	const int it_max = 1000000000;
 	
 	// SOR iteration tolerance
 	const Real tol = 0.001;
@@ -775,8 +775,30 @@ int main (void)
 		pres_black[i] = ZERO;
 	}
 
-	// set device
-	checkCudaErrors(cudaSetDevice (1));
+	// set device using command line argument (if any)
+	if (argc == 1) {
+		// default device id is 0
+		checkCudaErrors (cudaSetDevice (0) );
+	} else {
+		// use second argument for number
+
+		// get number of devices
+		int num_devices;
+		cudaGetDeviceCount(&num_devices);
+
+		// first check if is number
+		int id = *(argv[1]) - '0';
+
+		if ((id >= 0) && (id < num_devices)) {
+			checkCudaErrors (cudaSetDevice (id) );
+		} else {
+			// not in range, error
+			printf("Error: GPU device number not in correct range\n");
+			printf("Provide number between 0 and %i\n", num_devices - 1);
+			exit(1);
+		}
+	}
+	
 
 	// print problem size
 	printf("Problem size: %d x %d \n", NUM, NUM);
@@ -1005,6 +1027,10 @@ int main (void)
 
 		// increase time
 		time += dt;
+
+
+		// single time step
+		//break;
 		
 	} // end while
 	
